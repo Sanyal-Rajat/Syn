@@ -1,0 +1,197 @@
+"""Loopback-only remote compute API. Start with one Uvicorn worker behind SSH."""
+from contextlib import asynccontextmanager
+from functools import lru_cache
+import io
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+from threading import RLock, Thread
+from uuid import uuid4
+import zipfile
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel
+
+from lidarpoc.config import RunConfig
+from lidarpoc.io import write_json as save
+
+ROOT = Path(os.environ.get('LIDARPOC_RUNS', Path(__file__).parent / 'runs')).expanduser().resolve()
+PROCESSES = {}
+LOCK = RLock()
+
+
+def job_dir(job_id):
+    if not re.fullmatch(r'[0-9a-f]{32}', job_id):
+        raise HTTPException(404, 'Unknown job')
+    path = ROOT / job_id
+    if not (path / 'state.json').is_file():
+        raise HTTPException(404, 'Unknown job')
+    return path
+
+
+def stop_process(process):
+    if process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(_):
+    ROOT.mkdir(parents=True, exist_ok=True)
+    for state_file in ROOT.glob('*/state.json'):
+        state = json.loads(state_file.read_text())
+        if state['status'] == 'running':
+            state['status'] = 'interrupted'
+            save(state_file, state)
+    yield
+    with LOCK:
+        processes = list(PROCESSES.values())
+        for process in processes:
+            stop_process(process)
+    for process in processes:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+
+app = FastAPI(title='LiDAR generation compute server', lifespan=lifespan)
+
+
+@lru_cache(maxsize=1)
+def system_info():
+    from lidarpoc.gpu import hardware
+    return hardware()
+
+
+@app.get('/health')
+def health():
+    return {'status': 'ok', 'hardware': system_info()}
+
+
+class DatasetRequest(BaseModel):
+    root: str
+
+
+@app.post('/dataset/inspect')
+def inspect(request: DatasetRequest):
+    from lidarpoc.data.pandar_reader import inspect_dataset
+    try:
+        return {'recordings': inspect_dataset(request.root)}
+    except (ValueError, OSError) as error:
+        raise HTTPException(422, str(error)) from error
+
+
+def monitor(job_id, process):
+    code = process.wait()
+    with LOCK:
+        path = ROOT / job_id / 'state.json'
+        state = json.loads(path.read_text())
+        if state['status'] == 'running':
+            state['status'] = 'completed' if code == 0 and (path.parent / 'result.json').is_file() else 'failed'
+            state['returncode'] = code
+            save(path, state)
+        PROCESSES.pop(job_id, None)
+
+
+@app.post('/jobs', status_code=202)
+def start(config: RunConfig):
+    if config.action != 'prepare':
+        from lidarpoc.data.split_manifest import load_manifest
+        try:
+            load_manifest(config.manifest)
+        except (ValueError, OSError, KeyError) as error:
+            raise HTTPException(422, str(error)) from error
+    with LOCK:
+        if any(process.poll() is None for process in PROCESSES.values()):
+            raise HTTPException(409, 'A compute job is already running. Wait or cancel it first.')
+        job_id = uuid4().hex
+        path = ROOT / job_id
+        path.mkdir(parents=True)
+        (path / 'request.json').write_text(config.model_dump_json(indent=2))
+        state = {'id': job_id, 'status': 'running', 'action': config.action}
+        save(path / 'state.json', state)
+        try:
+            with (path / 'worker.log').open('w') as log:
+                process = subprocess.Popen([sys.executable, '-u', '-m', 'lidarpoc.runner',
+                                             '--request', str(path / 'request.json'), '--output', str(path)],
+                                            cwd=Path(__file__).parent, stdout=log, stderr=subprocess.STDOUT,
+                                            start_new_session=True)
+        except OSError as error:
+            state['status'] = 'failed'
+            save(path / 'state.json', state)
+            raise HTTPException(500, str(error)) from error
+        PROCESSES[job_id] = process
+        Thread(target=monitor, args=(job_id, process), daemon=True).start()
+    return state
+
+
+@app.get('/jobs')
+def jobs():
+    return [json.loads(path.read_text()) for path in sorted(ROOT.glob('*/state.json'),
+                                                           key=lambda path: path.stat().st_mtime, reverse=True)[:50]]
+
+
+@app.get('/jobs/{job_id}')
+def status(job_id: str):
+    path = job_dir(job_id)
+    state = json.loads((path / 'state.json').read_text())
+    if (path / 'progress.json').is_file():
+        state['progress'] = json.loads((path / 'progress.json').read_text())
+    if (path / 'training.json').is_file():
+        state['training'] = json.loads((path / 'training.json').read_text())
+    if (path / 'worker.log').is_file():
+        with (path / 'worker.log').open('rb') as stream:
+            stream.seek(max(0, (path / 'worker.log').stat().st_size - 12000))
+            state['log'] = stream.read().decode(errors='replace')
+    return state
+
+
+@app.post('/jobs/{job_id}/cancel')
+def cancel(job_id: str):
+    with LOCK:
+        path = job_dir(job_id)
+        process = PROCESSES.get(job_id)
+        if process is None or process.poll() is not None:
+            raise HTTPException(409, 'Job is not running in this server')
+        state = json.loads((path / 'state.json').read_text())
+        state['status'] = 'cancelled'
+        save(path / 'state.json', state)
+        stop_process(process)
+    return state
+
+
+@app.get('/jobs/{job_id}/result')
+def result(job_id: str):
+    path = job_dir(job_id) / 'result.json'
+    if not path.is_file():
+        raise HTTPException(409, 'Result is not available yet')
+    return FileResponse(path, media_type='application/json', filename='result.json')
+
+
+@app.get('/jobs/{job_id}/artifacts')
+def artifacts(job_id: str):
+    path = job_dir(job_id)
+    if not (path / 'result.json').is_file():
+        raise HTTPException(409, 'Complete the job before exporting artifacts')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for filename in ('request.json', 'result.json', 'dependency-lock.json', 'profiles.json', 'training.json'):
+            if (path / filename).is_file():
+                archive.write(path / filename, filename)
+        for pattern in ('*.pt', 'sample_*.npz'):
+            for file in path.glob(pattern):
+                archive.write(file, file.name)
+        for file in (Path(__file__).parent / 'LICENSES').iterdir():
+            if file.is_file():
+                archive.write(file, f'LICENSES/{file.name}')
+    return Response(buffer.getvalue(), media_type='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="lidarpoc-{job_id}.zip"'})

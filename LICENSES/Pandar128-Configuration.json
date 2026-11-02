@@ -1,0 +1,52 @@
+{
+        "ADAS Front Camera Wide": {
+            "Mounting position": {
+                "pos_x_m": "2.064",
+                "pos_y_m": "0.000",
+                "pos_z_m": "1.213",
+                "yaw_deg": "-1.40",
+                "pitch_deg": "-0.83",
+                "roll_deg": "-1.51"
+            },
+            "FOV": {
+                "horizontal": "120",
+                "vertical": "73"
+            },
+            "Sensor specific parameters": {
+                "intrinsics": {
+                    "f_x": "1341.684118",
+                    "f_y": "1348.879723",
+                    "c_x": "1437.123805",
+                    "c_y": "973.23026"
+                },
+                "distortion": {
+                    "K1": "0.293044",
+                    "K2": "-0.023385",
+                    "K3": "0.001424",
+                    "K4": "0.685475",
+                    "P1": "-0.000198",
+                    "P2": "-4.60E-05"
+                },
+                "video_size": {
+                    "width": "2896",
+                    "height": "1876"
+                }
+            }
+        },
+        "Pandar 128": {
+            "Mounting position": {
+                "pos_x_m": "1.111",
+                "pos_y_m": "0.000",
+                "pos_z_m": "1.837",
+                "yaw_deg": "-90.25",
+                "pitch_deg": "0.75",
+                "roll_deg": "-0.25",
+                "location": "RF_TP",
+                "orientation": "NO"
+            },
+            "FOV": {
+                "horizontal": "360",
+                "vertical": "40"
+            }
+        }
+}

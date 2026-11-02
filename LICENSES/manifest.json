@@ -1,0 +1,21 @@
+{
+  "model": {
+    "url": "https://github.com/vzyrianov/LidarDM",
+    "commit": "9d16b795b640630056ff48dc4c49dddff1c2da92",
+    "license_file": "MODEL-MIT.txt",
+    "license_sha256": "8978f086ca42f16b98a5bf9b7f64b9536dd6eed940148d8f6bcc19516d3d8810",
+    "original_unet_sha256": "f78fce3de7b28d5969b4a8c5dc5b25ee382663068e3cb9a4b66322465eba30e7"
+  },
+  "dataset": {
+    "url": "https://huggingface.co/datasets/filipberanek/pandar128-lane-line-detection",
+    "repo_id": "filipberanek/pandar128-lane-line-detection",
+    "source_commit": "f3bc4f9e7c2f7e6b06b6b1db521c11f3cbb56663",
+    "license_file": "DATASET-MIT.txt",
+    "license_sha256": "be9c3b1107b08672ac29ffe704d8d127ad6af7f06dc5713d46b33c6dcf9f1055",
+    "revision": "3366842fa701e4e5ec313f9124acb84b502f11ee",
+    "card_sha256": "c35ea4ccaf1acbdffa44f58a2703f077d8fc6705fa41934c7bd977dc65c8820e"
+  },
+  "pretrained_weights": [],
+  "extra_assets": [],
+  "dependency_audit": "pending"
+}

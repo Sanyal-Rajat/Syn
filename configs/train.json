@@ -1,0 +1,15 @@
+{
+  "action": "train",
+  "manifest": "/data/pandar128/projected/manifest.json",
+  "gpus": 1,
+  "epochs": 5,
+  "batch_size": 2,
+  "window": 2,
+  "channels": 32,
+  "diffusion_steps": 1000,
+  "sample_steps": 50,
+  "rl_enabled": true,
+  "methods": ["ppo", "random_search", "bayesian", "cma_es"],
+  "budget": 30,
+  "seed": 0
+}
