@@ -26,13 +26,15 @@ def prepare(config, output, evidence):
     files = {split: sorted((root / split).glob('**/*_scan_list.npz')) for split in ('train', 'validation', 'test')}
     if any(not paths for paths in files.values()):
         raise ValueError('Extracted dataset needs train/, validation/, test/ trace directories')
+    beam_fit = None
     if config.elevations_file:
         elevations = np.deg2rad(np.loadtxt(config.elevations_file))
         beam_source = 'provided_calibration_degrees'
     elif config.infer_beams:
         first = load_arrays(files['train'][0])
         scans = [in_sensor_frame(unpack_scan(frame)[0], transform) for frame in first[:20]]
-        elevations = infer_elevations(scans, config.height, config.beam_tolerance_deg)
+        elevations, beam_fit = infer_elevations(scans, config.height, config.beam_tolerance_deg, return_diagnostics=True)
+        del first, scans
         beam_source = 'empirical_training_elevation_bins_not_factory_ring_ids'
     else:
         raise ValueError('Configuration.json contains mounting/FOV only. Supply beam elevations or enable training-only inference.')
@@ -47,6 +49,8 @@ def prepare(config, output, evidence):
                                 'beam_source': beam_source, 'input_frame': config.input_frame,
                                 'input_to_sensor': transform.tolist(), 'timestamp_source': 'nominal_20Hz_sequence_relative'},
                 'splits': {split: [] for split in files}, 'leakage_audit': 'whole-trace IDs, source hashes, exact and quantized projected-frame hashes'}
+    if beam_fit is not None:
+        manifest['sensor_meta']['beam_fit'] = beam_fit
     trace_splits, source_splits, fingerprints = {}, {}, {}
     for split, paths in files.items():
         for path in paths:

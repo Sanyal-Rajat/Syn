@@ -135,6 +135,12 @@ before the helper can share it. OpenSSH describes this behavior under
    The publisher's `Configuration.json` contains mounting pose/FOV, not a beam table.
    Training-only elevation-bin estimation is accepted
    only if its residual/spacing check passes and is not labeled factory ring IDs.
+   Estimation covers the observed angular span rather than allocating rows by
+   point density, so dense near-horizon returns do not consume the outer rows.
+   The unchanged angular error limit, observed residuals, spacing and accepted
+   fraction are logged and recorded under `sensor_meta.beam_fit` in the manifest.
+   If inference still fails, check the coordinate frame or supply measured angles;
+   retries reuse the completed downloads and extraction receipts.
 5. Run **Prepare Pandar128**, then copy the returned remote manifest path into the
    training form. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
