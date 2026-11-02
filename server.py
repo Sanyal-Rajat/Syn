@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from lidarpoc.config import RunConfig
+from lidarpoc.data.download import DATASET_ROOT
 from lidarpoc.io import write_json as save
 
 ROOT = Path(os.environ.get('LIDARPOC_RUNS', Path(__file__).parent / 'runs')).expanduser().resolve()
@@ -74,18 +75,18 @@ def system_info():
 
 @app.get('/health')
 def health():
-    return {'status': 'ok', 'hardware': system_info()}
+    return {'status': 'ok', 'hardware': system_info(), 'dataset_root': str(DATASET_ROOT)}
 
 
 class DatasetRequest(BaseModel):
-    root: str
+    root: str = ''
 
 
 @app.post('/dataset/inspect')
 def inspect(request: DatasetRequest):
     from lidarpoc.data.pandar_reader import inspect_dataset
     try:
-        return {'recordings': inspect_dataset(request.root)}
+        return {'recordings': inspect_dataset(request.root or DATASET_ROOT)}
     except (ValueError, OSError) as error:
         raise HTTPException(422, str(error)) from error
 
@@ -195,3 +196,8 @@ def artifacts(job_id: str):
                 archive.write(file, f'LICENSES/{file.name}')
     return Response(buffer.getvalue(), media_type='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="lidarpoc-{job_id}.zip"'})
+
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='127.0.0.1', port=9000, workers=1)

@@ -10,6 +10,7 @@ import torch
 
 from .calibration import DEFAULT, NAMES, apply, calibrate
 from .config import RunConfig
+from .data.download import ensure_dataset
 from .data.scan_to_range import unproject
 from .data.split_manifest import load_manifest, load_window, prepare, windows
 from .eval.domain_metrics import bootstrap, compare, describe
@@ -65,13 +66,15 @@ def run(config, directory):
     progress = lambda stage, done=0, total=1: write_json(directory / 'progress.json',
                                                        {'stage': stage, 'completed': done, 'total': total})
     if config.action == 'prepare':
+        config = config.model_copy(update={'dataset_root': ensure_dataset(config.dataset_root, evidence['dataset'], progress)})
+        write_json(directory / 'request.json', config.model_dump())
         progress('inspecting and projecting Pandar128 traces')
         manifest_path = prepare(config, directory / 'prepared', evidence)
         prepared = load_manifest(manifest_path)
         inventory = [{'split': split, 'sequence_id': trace['sequence_id'], 'frames': len(trace['frames']),
                       'source_frames': trace['source_frames'], 'schema': trace['schema']}
                      for split, traces in prepared['splits'].items() for trace in traces]
-        report = {'action': 'prepare', 'manifest': manifest_path, 'inventory': inventory,
+        report = {'action': 'prepare', 'dataset_root': config.dataset_root, 'manifest': manifest_path, 'inventory': inventory,
                   'sensor_meta': load_manifest(manifest_path)['sensor_meta']}
         write_json(directory / 'result.json', report)
         progress('prepared', 1)

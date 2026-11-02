@@ -1,9 +1,9 @@
 {
   "action": "prepare",
-  "dataset_root": "/data/pandar128",
+  "dataset_root": "",
   "input_frame": "vehicle",
-  "elevations_file": "/data/pandar128/beam_elevations_deg.txt",
-  "infer_beams": false,
+  "elevations_file": "",
+  "infer_beams": true,
   "height": 128,
   "width": 512,
   "max_frames": 128,

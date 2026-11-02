@@ -16,33 +16,56 @@ its GPUs, then install `requirements-server.txt` in a Python 3.11+ environment:
 
 ```bash
 python -m pip install -r requirements-server.txt
-uvicorn server:app --host 127.0.0.1 --port 8000 --workers 1
+python server.py
+# Equivalent: uvicorn server:app --host 127.0.0.1 --port 9000 --workers 1
 ```
 
 On the client, only the UI dependencies are required:
 
 ```bash
 python -m pip install -r requirements-client.txt
-ssh YOUR_USER@YOUR_SERVER
+ssh -i /path/to/your-key.pem YOUR_USER@YOUR_SERVER
 # Verify the host key once, then exit that login session.
-bash ssh_tunnel.sh start -H YOUR_SERVER -u YOUR_USER -p 8000 -l 8000
-streamlit run app.py --server.address 127.0.0.1
+bash ssh_tunnel.sh start -H YOUR_SERVER -u YOUR_USER -k /path/to/your-key.pem
+streamlit run app.py --server.address 127.0.0.1 --server.port 9000
+```
+
+Open `http://127.0.0.1:9000`. All application ports are **9000**: Streamlit binds
+client `127.0.0.1:9000`, the API tunnel binds client `127.0.0.2:9000`, and the remote
+API binds server `127.0.0.1:9000`. Separate client loopback addresses allow the UI
+and tunnel to share the same port. The Streamlit defaults are also saved in
+`.streamlit/config.toml`. Run these commands from the project directory.
+
+The same tunnel can be opened directly with your working SSH key, instead of the helper:
+
+```bash
+ssh -i /path/to/your-key.pem -o ExitOnForwardFailure=yes -N \
+  -L 127.0.0.2:9000:127.0.0.1:9000 YOUR_USER@YOUR_SERVER
 ```
 
 The UI can also start/status/close its own tunnel. For a nondefault SSH port use
 `-P 2222`; `-k /path/to/key` selects a client-side key. SSH aliases and agent keys
-work. The tunnel binds to client loopback and forwards to server loopback. Closing
+work. The SSH transport retains its existing port (22 by default); this does not
+change the server's SSH daemon. The tunnel forwards between loopback addresses. Closing
 the browser or tunnel does not stop remote jobs. Cancellation stops the job's
 process group, including its training workers. API shutdown stops active jobs.
 Use one Uvicorn worker. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact storage.
 
 ## Data and experiments
 
-1. Download the selected dataset revision
-   `3366842fa701e4e5ec313f9124acb84b502f11ee` from
-   [Pandar128](https://huggingface.co/datasets/filipberanek/pandar128-lane-line-detection).
-   Extract into `train/<trace>/`, `validation/<trace>/`, `test/<trace>/`. The code
-   consumes `*_scan_list.npz`; camera videos and other datasets are not needed.
+1. Choose **Prepare Pandar128** and click **Start remote job**. With the dataset
+   directory left blank, the server automatically downloads the selected
+   [Pandar128](https://huggingface.co/datasets/filipberanek/pandar128-lane-line-detection)
+   revision `3366842fa701e4e5ec313f9124acb84b502f11ee` into the server project's
+   `datasets/pandar128/` folder. Six archives (about 212 GB compressed) are retained
+   in `.downloads/`; extraction writes only `*_scan_list.npz` under
+   `train/<trace>/`, `validation/<trace>/`, `test/<trace>/`. Allow additional disk
+   space for the extracted scans and prepared caches. Downloading and extraction
+   run in the remote job, with progress and logs visible in the UI. Hugging Face
+   resumes interrupted downloads; `.download.json` tracks fully extracted archives,
+   so retries reuse completed work and repair missing/truncated scans. An optional
+   directory override accepts an already extracted dataset. `datasets/` is ignored
+   by Git.
 2. Inspect NPZ schemas from the UI. Published structured scalar XYZ/intensity,
    legacy vector-XYZ/i, and the publisher writer's object-tuple variant are handled.
    Variable-length object NPZ files use NumPy pickle loading; use the publisher's
@@ -51,9 +74,10 @@ Use one Uvicorn worker. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact storag
 3. Confirm the input coordinate frame. `vehicle` applies the inverse of the
    captured Pandar128 mounting transform; `sensor` uses the points directly.
    Coordinates are metres, sensor axes are right handed, and azimuth is atan2(y,x).
-4. Supply **128 sorted beam elevations in degrees**, one number per line. The
-   publisher's `Configuration.json` contains mounting pose/FOV, not a beam table.
-   Training-only elevation-bin estimation is available explicitly; it is accepted
+4. **Estimate from training scans** is the default beam setting. Alternatively,
+   supply **128 sorted measured beam elevations in degrees**, one number per line.
+   The publisher's `Configuration.json` contains mounting pose/FOV, not a beam table.
+   Training-only elevation-bin estimation is accepted
    only if its residual/spacing check passes and is not labeled factory ring IDs.
 5. Run **Prepare Pandar128**, then copy the returned remote manifest path into the
    training form. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
@@ -112,7 +136,8 @@ python -m lidarpoc.runner --request configs/train.json --output runs/train
 
 ## Libraries and verification
 
-`lidarpoc/data/` handles NPZ, transforms, projection and splits. `models/` holds the
+`lidarpoc/data/download.py` handles pinned downloads, selective extraction and
+reuse. The other `data/` modules handle NPZ, transforms, projection and splits. `models/` holds the
 LidarDM adapter and masking. `methods/` keeps each calibration method independent.
 `train.py` handles optimization/DDP; `calibration.py` handles PPO's environment;
 `eval/domain_metrics.py` holds metrics. `runner.py` orchestrates these libraries.
@@ -133,5 +158,7 @@ python -m pytest -q
 Tests use small synthetic fixtures in the publisher's scan schema. They exercise
 projection/masks, split and checkpoint gates, all calibration methods, real random
 diffusion training, own-checkpoint reload, geometry conditioning, API jobs and UI
-submission. A full Pandar128 training run and multi-GPU performance require the
-remote dataset and hardware. No large dataset or pretrained artifacts are bundled.
+submission, pinned downloads, selective extraction, interrupted extraction recovery,
+and the port-9000 tunnel configuration. A full Pandar128 training run and multi-GPU
+performance require the remote dataset and hardware. No large dataset or pretrained
+artifacts are bundled.

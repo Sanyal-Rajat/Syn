@@ -14,14 +14,14 @@ st.caption('LidarDM range-image adaptation · random-initialized diffusion · PP
 
 with st.sidebar:
     st.subheader('Remote connection')
-    local_port = st.number_input('Local tunnel port', 1024, 65535, 8000)
-    endpoint = f'http://127.0.0.1:{local_port}'
+    local_port = st.number_input('Local tunnel port', 1024, 65535, 9000)
+    endpoint = f'http://127.0.0.2:{local_port}'
     with st.expander('SSH tunnel'):
         host = st.text_input('SSH host or configured alias')
         user = st.text_input('SSH user (optional for an alias)')
         key = st.text_input('Private key path on this client')
         ssh_port = st.number_input('SSH port', 1, 65535, 22)
-        remote_port = st.number_input('Remote API port', 1024, 65535, 8000)
+        remote_port = st.number_input('Remote API port', 1024, 65535, 9000)
         a, b, c = st.columns(3)
         command = 'start' if a.button('Connect') else 'status' if b.button('Status') else 'stop' if c.button('Close') else None
         if command:
@@ -40,7 +40,7 @@ with st.sidebar:
 
 
 def api(method, path, **kwargs):
-    response = httpx.request(method, endpoint + path, timeout=kwargs.pop('timeout', 10), **kwargs)
+    response = httpx.request(method, endpoint + path, timeout=kwargs.pop('timeout', 10), trust_env=False, **kwargs)
     response.raise_for_status()
     return response
 
@@ -49,9 +49,9 @@ try:
     health = api('GET', '/health').json()
 except httpx.HTTPError:
     st.info('Start the remote API and connect the SSH tunnel to this client.')
-    st.code('Remote: uvicorn server:app --host 127.0.0.1 --port 8000 --workers 1\n'
+    st.code('Remote: python server.py\n'
             'Client: bash ssh_tunnel.sh start -H YOUR_SERVER -u YOUR_USER\n'
-            'Client: streamlit run app.py --server.address 127.0.0.1')
+            'Client: streamlit run app.py --server.address 127.0.0.1 --server.port 9000')
     st.stop()
 
 st.sidebar.success('Remote API connected')
@@ -64,11 +64,14 @@ with configure:
     action = 'prepare' if task.startswith('Prepare') else 'train' if task.startswith('Train') else 'generate'
     config = {'action': action}
     if action == 'prepare':
-        config['dataset_root'] = st.text_input('Extracted dataset directory on the server', placeholder='/data/pandar128')
+        st.caption('Preparation automatically downloads and extracts Pandar128 on the server. Completed files are reused.')
+        st.caption(f"Default server dataset folder: {health.get('dataset_root', '<project>/datasets/pandar128')}")
+        config['dataset_root'] = st.text_input('Dataset directory on the server (optional override)',
+                                              placeholder='Leave blank for the project datasets/pandar128 folder')
         left, right = st.columns(2)
         config['input_frame'] = left.selectbox('Input coordinate frame', ['vehicle', 'sensor'],
                                                help='Confirm against the publisher scan schema. Vehicle points are transformed with Configuration.json.')
-        beam_source = right.selectbox('Beam elevations', ['Measured calibration file', 'Estimate from training scans'])
+        beam_source = right.selectbox('Beam elevations', ['Estimate from training scans', 'Measured calibration file'])
         config['infer_beams'] = beam_source.startswith('Estimate')
         config['elevations_file'] = st.text_input('Server path to 128 elevations in degrees, sorted ascending',
                                                  disabled=config['infer_beams'])
@@ -77,6 +80,7 @@ with configure:
         config['width'] = st.selectbox('Azimuth columns', [256, 512, 1024, 2048], index=1)
         config['intensity_max'] = st.number_input('Intensity normalization maximum', min_value=.001, value=255.)
         config['max_frames'] = st.number_input('Frames to prepare per trace', 2, 100000, 128)
+        st.caption('Inspect NPZ schemas checks existing files. Start remote job downloads missing data before preparation.')
         if st.button('Inspect NPZ schemas'):
             try:
                 st.dataframe(api('POST', '/dataset/inspect', json={'root': config['dataset_root']}, timeout=120).json()['recordings'])

@@ -12,7 +12,7 @@ class RunConfig(BaseModel):
     calibration_file: str = str(Path(__file__).resolve().parents[1] / 'LICENSES/Pandar128-Configuration.json')
     input_frame: Literal['sensor', 'vehicle'] = 'vehicle'
     elevations_file: str = ''
-    infer_beams: bool = False
+    infer_beams: bool = True
     height: int = Field(128, ge=4, le=128)
     width: int = Field(512, ge=8, le=2048)
     max_range_m: float = Field(120., gt=1, le=200)
@@ -49,8 +49,8 @@ class RunConfig(BaseModel):
             raise ValueError('Height, width and model channels must be divisible by four')
         if self.sample_steps > self.diffusion_steps:
             raise ValueError('Sampling steps cannot exceed diffusion training steps')
-        if self.action == 'prepare' and not self.dataset_root:
-            raise ValueError('Provide the extracted Pandar128 dataset directory')
+        if self.action == 'prepare' and not self.infer_beams and not self.elevations_file:
+            raise ValueError('Provide measured beam elevations or enable training-only beam estimation')
         if self.action != 'prepare' and not self.manifest:
             raise ValueError('Provide the prepared split manifest path on the server')
         if self.action == 'generate' and not self.checkpoint:

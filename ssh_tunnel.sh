@@ -4,7 +4,7 @@
 set -euo pipefail
 command=${1:-help}
 [[ $# -gt 0 ]] && shift
-ssh_user=""; ssh_host=""; ssh_key=""; ssh_port=22; remote_port=8000; local_port=8000
+ssh_user=""; ssh_host=""; ssh_key=""; ssh_port=22; remote_port=9000; local_port=9000
 while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || { echo "Missing value for $1" >&2; exit 2; }
     case "$1" in
@@ -33,8 +33,8 @@ case "$command" in
         [[ -z $ssh_key ]] || options+=(-i "$ssh_key")
         [[ -z $ssh_user ]] || options+=(-l "$ssh_user")
         ssh -M -S "$control_socket" -fNT "${options[@]}" \
-            -L "127.0.0.1:${local_port}:127.0.0.1:${remote_port}" "$ssh_host"
-        echo "Tunnel ready: http://127.0.0.1:${local_port}"
+            -L "127.0.0.2:${local_port}:127.0.0.1:${remote_port}" "$ssh_host"
+        echo "API tunnel ready: http://127.0.0.2:${local_port}"
         ;;
     status) ssh -S "$control_socket" -O check localhost ;;
     stop) ssh -S "$control_socket" -O exit localhost ;;
