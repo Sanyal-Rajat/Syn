@@ -16,7 +16,8 @@ from .gpu import auto_configure_training
 from .io import write_json
 from .logs import get_logger, progress
 from .models.lidardm_adapter import LidarDMAdapter
-from .provenance import license_gate, provenance
+from .provenance import license_gate, provenance, validate_checkpoint
+from .data.split_manifest import digest
 
 
 class RangeDataset(Dataset):
@@ -38,6 +39,9 @@ def collate(samples):
               for key in ('range', 'valid', 'intensity', 'has_intensity', 'timestamp_ns')}
     result['sequence_id'] = [sample['sequence_id'] for sample in samples]
     result['sensor_meta'] = samples[0]['sensor_meta']
+    for key in ('labels', 'world_from_sensor'):
+        if all(key in sample for sample in samples):
+            result[key] = torch.as_tensor(np.stack([sample[key] for sample in samples]))
     return result
 
 
@@ -70,7 +74,15 @@ def train(config, output):
         loader = DataLoader(train_data, batch_size=batch_size, sampler=sampler, shuffle=sampler is None,
                             collate_fn=collate, num_workers=config.workers, pin_memory=device.type == 'cuda')
         validation = DataLoader(validation_data, batch_size=config.batch_size, collate_fn=collate)
-        model = LidarDMAdapter(config.model_dump(), manifest['sensor_meta']).to(device)
+        model_type = LidarDMAdapter
+        if any((config.ot.conditional_weight, config.ot.mass_weight, config.ot.physics_weight, config.ot.regularization_weight)):
+            from .models.ot_adapter import OTLidarDMAdapter
+            model_type = OTLidarDMAdapter
+        model = model_type(config.model_dump(), manifest['sensor_meta']).to(device)
+        if config.warm_start:
+            parent = torch.load(config.warm_start, map_location='cpu', weights_only=True)
+            validate_checkpoint(parent, config.manifest)
+            model.load_state_dict(parent['state_dict'])
         if distributed:
             model = DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
         optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
@@ -81,6 +93,12 @@ def train(config, output):
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
         proof = provenance(config.manifest, config.model_dump())
+        if config.ot.reference:
+            proof['ot_reference_sha256'] = digest(config.ot.reference)
+            proof['ot_reference_split'] = 'train'
+        if config.warm_start:
+            proof['stage_initialization'] = 'own_checkpoint'
+            proof['parent_checkpoint_sha256'] = digest(config.warm_start)
         if rank == 0:
             get_logger().info('Training on %s with %d worker(s), %d training windows, batch size %d',
                               device, int(os.environ.get('WORLD_SIZE', '1')), len(train_data), batch_size)
@@ -89,6 +107,7 @@ def train(config, output):
                 sampler.set_epoch(epoch)
             model.train()
             losses = []
+            components_history = {}
             optimizer.zero_grad()
             for step, batch in enumerate(loader):
                 with autocast():
@@ -106,6 +125,8 @@ def train(config, output):
                     scaler.update()
                     optimizer.zero_grad()
                 losses.append(float(components['loss'].detach()))
+                for key, value in components.items():
+                    components_history.setdefault(key, []).append(float(value.detach()))
                 if rank == 0 and ((step + 1) % max(1, len(loader) // 20) == 0 or step + 1 == len(loader)):
                     progress(output, f'epoch {epoch + 1}/{config.epochs}, loss={losses[-1]:.6f}', step + 1, len(loader))
             raw_model = model.module if distributed else model
@@ -123,6 +144,8 @@ def train(config, output):
             validation_loss = float(metric[0] / metric[1].clamp_min(1))
             if rank == 0:
                 record = {'epoch': epoch + 1, 'train_loss': sum(losses) / len(losses), 'validation_loss': validation_loss}
+                record.update({f'train_{key}': sum(values) / len(values) for key, values in components_history.items()
+                               if key != 'loss'})
                 history.append(record)
                 write_json(output / 'training.json', history)
                 get_logger().info('Epoch metrics: %s', json.dumps(record))

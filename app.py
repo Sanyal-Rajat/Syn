@@ -67,6 +67,15 @@ def api(method, path, **kwargs):
     return response
 
 
+def json_setting(label, default):
+    value = st.text_input(label, json.dumps(default))
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as error:
+        st.error(f'{label}: invalid JSON ({error.msg})')
+        st.stop()
+
+
 try:
     health = api('GET', '/health').json()
 except httpx.HTTPError:
@@ -82,8 +91,8 @@ with st.sidebar.expander('Remote hardware'):
 
 configure, results = st.tabs(['Configure', 'Monitor and results'])
 with configure:
-    task = st.radio('Operation', ['Prepare Pandar128', 'Train diffusion + calibration', 'Generate'], horizontal=True)
-    action = 'prepare' if task.startswith('Prepare') else 'train' if task.startswith('Train') else 'generate'
+    task = st.radio('Operation', ['Prepare Pandar128', 'Train diffusion + calibration', 'Generate', 'OT + diffusion + RL experiment'], horizontal=True)
+    action = 'prepare' if task.startswith('Prepare') else 'train' if task.startswith('Train') else 'experiment' if task.startswith('OT') else 'generate'
     config = {'action': action}
     if action == 'prepare':
         st.caption('Preparation automatically downloads and extracts Pandar128 on the server. Completed files are reused.')
@@ -102,6 +111,8 @@ with configure:
         config['width'] = st.selectbox('Azimuth columns', [256, 512, 1024, 2048], index=1)
         config['intensity_max'] = st.number_input('Intensity normalization maximum', min_value=.001, value=255.)
         config['max_frames'] = st.number_input('Frames to prepare per trace', 2, 100000, 128)
+        config['odometry_mode'] = st.selectbox('Odometry convention (confirm before enabling)',
+            ['disabled', 'world_from_vehicle', 'previous_from_current'], help='Publisher conventions must be confirmed; no identity poses are invented.')
         st.caption('Inspect NPZ schemas checks existing files. Start remote job downloads missing data before preparation.')
         if st.button('Inspect NPZ schemas'):
             try:
@@ -120,15 +131,18 @@ with configure:
                                                   help='range and valid arrays [T,H,W], matching the checkpoint sensor. Full-scene geometry is preserved.')
             config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')
             config['profile_name'] = st.text_input('Calibration profile name', 'ppo')
+            config['controller_file'] = st.text_input('Optional frozen OT controller.pt on the server',
+                help='Requires a canonical scene NPZ and the exact own checkpoint used to train this controller.')
         else:
             left, middle, right = st.columns(3)
             config['epochs'] = left.number_input('Epochs', 1, 10000, 5)
             config['batch_size'] = middle.number_input('Batch size per GPU', 1, 64, 2)
             config['window'] = right.number_input('Frames per temporal window', 1, 5, 2)
-            config['rl_enabled'] = st.checkbox('Run PPO calibration and optimizer comparisons', value=True)
-            config['methods'] = st.multiselect('Calibration methods', ['ppo', 'random_search', 'bayesian', 'cma_es'],
-                                               default=['ppo', 'random_search', 'bayesian'])
-            config['budget'] = st.number_input('Calibration calls per method', 6, 5000, 30)
+            config['rl_enabled'] = st.checkbox('Run PPO calibration and optimizer comparisons' if action == 'train' else 'Enable experimental RL controllers', value=True)
+            if action == 'train':
+                config['methods'] = st.multiselect('Calibration methods', ['ppo', 'random_search', 'bayesian', 'cma_es'],
+                                                   default=['ppo', 'random_search', 'bayesian'])
+            config['budget'] = st.number_input('Calibration calls per method' if action == 'train' else 'Generation-call budget per controller', 6, 5000, 30)
             with st.expander('Training settings'):
                 config['channels'] = st.selectbox('Base model channels', [8, 16, 32, 64, 128], index=2)
                 config['diffusion_steps'] = st.number_input('Training diffusion steps', 10, 2000, 1000)
@@ -136,6 +150,36 @@ with configure:
                 config['workers'] = st.number_input('DataLoader workers per GPU', 0, 16, 0)
                 config['lr'] = st.number_input('Learning rate', value=.0001, min_value=.000001, max_value=.01, format='%.6f')
         config['seed'] = st.number_input('Seed', 0, 2147483647, 0)
+        if action == 'experiment':
+            st.caption('Adds E0–E5 experiments. All choices freeze on development data before final real test arrays are decoded.')
+            config['checkpoint'] = st.text_input('Optional own checkpoint for adaptation (random-root provenance required)')
+            config['experiment'] = {
+                'ablations': st.multiselect('Experiment arms', ['E0', 'E1', 'E2', 'E3', 'E4', 'E5'],
+                                            default=['E0', 'E1', 'E2', 'E3', 'E4', 'E5']),
+                'seeds': json_setting('Experiment seeds (JSON)', [0, 1, 2]),
+                'controllers': st.multiselect('Frozen-generator controllers',
+                    ['fixed', 'random_search', 'bayesian', 'cma_es', 'sac', 'contextual_bandit', 'ppo'],
+                    default=['fixed', 'random_search', 'bayesian', 'cma_es', 'sac']),
+                'synthetic_scenes': st.number_input('Procedural canonical scenes per split', 1, 100, 4),
+                'controller_seconds': st.number_input('Controller time budget per method (seconds)', 1., 86400., 300.),
+                'controller_max_samples': st.number_input('Maximum generated samples per controller action', 1, 16, 2),
+                'downstream': st.checkbox('Run labeled point-segmentation transfer probe', value=False),
+                'label_source_confirmed': st.checkbox('I confirmed the native semantic label source and class meanings', value=False),
+            }
+            config['ot'] = {
+                'epsilon': st.number_input('Sinkhorn entropy regularization', min_value=.001, value=.1),
+                'iterations': st.number_input('Sinkhorn iterations', 5, 500, 60),
+                'min_samples': st.number_input('Minimum returns per conditional bin', 2, 64, 4),
+                'max_points': st.number_input('Maximum transport points per conditional bin', 4, 512, 64),
+            }
+            with st.expander('Transport units and external simulator scenes'):
+                st.caption('Default features: range, intensity, elevation, local return rate and sensor-frame persistence. Scales freeze before fitting.')
+                config['ot']['range_edges_m'] = json_setting('Fixed range-bin edges (JSON, metres)', [0, 30, 60, 120])
+                config['ot']['feature_scales'] = json_setting('Physical feature scales (JSON)', [120, 1, 1.5707963268, 1, 1])
+                config['ot']['feature_weights'] = json_setting('Physical feature weights (JSON)', [1, 1, .25, .5, .5])
+                config['experiment']['label_budgets'] = json_setting('Real label budgets (JSON)', [512, 2048])
+                for split, key in [('Training', 'scene_files'), ('Development', 'development_scene_files'), ('Test', 'test_scene_files')]:
+                    config['experiment'][key] = [line.strip() for line in st.text_area(f'{split} canonical NPZ paths on server (one per line)').splitlines() if line.strip()]
     if st.button('Start remote job', type='primary'):
         try:
             state = api('POST', '/jobs', json=config).json()
@@ -216,6 +260,17 @@ def monitor():
             st.dataframe(report['inventory'])
         elif report['action'] == 'generate':
             st.success(f"Generated {report['samples']} LiDAR windows.")
+        elif report['action'] == 'experiment':
+            st.write(f"Selected on development data: {report['selected_arm']}")
+            st.dataframe([{'arm': name, 'test_OT_gap': value['mean'], 'session_CI95': str(value['ci95'])}
+                          for name, value in report['session_intervals'].items()], hide_index=True)
+            st.json(report['gates'])
+            with st.expander('OT components, physical checks, task budgets and compute'):
+                st.json(report['development'])
+                st.json(report['evaluations'])
+                st.json(report['data_efficiency'])
+                st.json(report['compute'])
+                st.write(report['limitations'])
         else:
             st.line_chart(pd.DataFrame(report['training']).set_index('epoch'))
             st.dataframe([{'method': name, 'held_out_loss': value['loss']['mean'], 'CI95': str(value['loss']['ci95'])}

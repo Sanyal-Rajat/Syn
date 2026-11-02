@@ -1,6 +1,7 @@
 # Pandar128 LiDAR generation PoC
 
-Implements `clean_license_lidar_poc_report.pdf`, with **RL retained at your request**.
+Implements `clean_license_lidar_poc_report.pdf` and adds the optional experiment
+workflow from `sim_to_real_OT_diffusion_RL_updated_report.pdf`, with **RL retained**.
 The Streamlit UI runs on the client. The API, dataset reader, diffusion training,
 calibration and evaluation run on the remote server through an SSH tunnel.
 
@@ -113,9 +114,9 @@ before the helper can share it. OpenSSH describes this behavior under
    [Pandar128](https://huggingface.co/datasets/filipberanek/pandar128-lane-line-detection)
    revision `3366842fa701e4e5ec313f9124acb84b502f11ee` into the server project's
    `datasets/pandar128/` folder. Six archives (about 212 GB compressed) are retained
-   in `.downloads/`; extraction writes only `*_scan_list.npz` under
+   in `.downloads/`; extraction writes scans and available `*_odom_list.npz` under
    `train/<trace>/`, `validation/<trace>/`, `test/<trace>/`. Allow additional disk
-   space for the extracted scans and prepared caches. Downloading and extraction
+   space for these extracted records and prepared caches. Downloading and extraction
    run in the remote job, with progress and logs visible in the UI. Hugging Face
    resumes interrupted downloads; `.download.json` tracks fully extracted archives,
    so retries reuse completed work and repair missing/truncated scans. An optional
@@ -157,11 +158,12 @@ To generate with an independent synthetic scene, provide a numeric NPZ with
 `range` and `valid` arrays `[T,H,W]` matching the checkpoint. Complete-scene
 generation introduces no returns outside its mask and clips deviations at known
 surfaces to the configured tolerance. This is ray-space conditioning, not scene
-reconstruction. Pose-aware temporal warping and downstream perception training
-are not implemented; temporal metrics describe sensor-frame persistence.
+reconstruction. The original calibration metrics describe sensor-frame persistence;
+the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
 PPO is adapted from `on_policy_RL_Agents.py` and `networks_RL_Agents.py` in the
-requested existing project. SAC there is disabled and is not exposed as working.
+requested existing project. SAC in that source is disabled; this update adds an
+independent working SAC implementation for the new experiment controls.
 PPO calibrates bounded range bias/noise, drop probability and intensity scale.
 Random search, Bayesian optimization and CMA-ES share the same evaluation budget
 and frozen generated samples. Rewards use training traces; five candidate profiles
@@ -189,6 +191,48 @@ python -m lidarpoc.runner --request configs/prepare.json --output runs/prepare
 python -m lidarpoc.runner --request configs/train.json --output runs/train
 ```
 
+## OT, diffusion and RL experiments
+
+Prepare the data, then choose **OT + diffusion + RL experiment** in the existing
+client UI and enter the returned server manifest path. The original Train and
+Generate operations remain available. The new workflow runs E0–E5 across the
+selected seeds, including conditional debiased Sinkhorn, unequal-mass KL transport,
+geometry/temporal constraints and a frozen-generator controller comparison.
+SAC, contextual bandit, PPO, fixed controls, random search, BO and CMA-ES are available.
+
+For a headless run, edit the server manifest path and resource limits in
+`configs/experiment.json`, then run on the server:
+
+```bash
+python -m lidarpoc.runner --request configs/experiment.json --output runs/ot-experiment
+```
+
+The example includes seven controllers and three seeds; it runs several diffusion
+training jobs sequentially. `gpus > 1` uses the existing distributed trainer for
+each diffusion arm. Controllers and generation use one GPU. Generation-call counts,
+denoiser evaluations and measured elapsed allocation are exported; the controller
+time cap is checked between actions. A final action can overrun it, and such a run
+cannot pass the equal-budget RL gate.
+
+Default scenes are generated locally from road planes, lane markings and boxes,
+with separate train/development/test geometry. Alternatively supply three separate
+lists of canonical simulator NPZ files. OT reference features come only from real
+training windows. All policies and arm selections freeze before real test arrays
+are decoded. Test-frame hashes are checked earlier for integrity.
+
+Task transfer evaluation is opt-in. Reprepare older caches to retain native labels;
+confirm their semantics before enabling the point-segmentation probe. To enable
+real pose metrics, also confirm the odometry convention during Prepare. Missing
+task/pose evidence leaves success gates pending. Reduced OT alone is not a task
+transfer result. This is a small point-wise probe, not a production detector.
+
+Generate can apply an exported `experiments/seed_<n>/E5_<method>/controller.pt`
+with its exact E4 checkpoint and a canonical scene NPZ. The bundle includes its
+frozen training reference and rejects another checkpoint or manifest. Existing
+PPO calibration profiles remain supported. See [implementation details and artifact
+formats](docs/ot_report_implementation.md) for the ablation matrix, fixed units,
+optional warm starts, provenance, budgets and remaining limits.
+
 ## Libraries and verification
 
 `lidarpoc/data/download.py` handles pinned downloads, selective extraction and
@@ -196,6 +240,9 @@ reuse. The other `data/` modules handle NPZ, transforms, projection and splits. 
 LidarDM adapter and masking. `methods/` keeps each calibration method independent.
 `train.py` handles optimization/DDP; `calibration.py` handles PPO's environment;
 `eval/domain_metrics.py` holds metrics. `runner.py` orchestrates these libraries.
+`ot/` keeps transport, references, constraints and controller integration separate;
+`models/ot_adapter.py` adds losses without changing the UNet capacity. `experiment.py`
+orchestrates the new matrix, and `eval/` contains the task, temporal and decision modules.
 `logs.py` handles process output, progress and log cursors; `telemetry.py` reads
 NVML independently of the training stack. `server.py` manages remote jobs, and
 `app.py` is a thin client.
@@ -218,6 +265,9 @@ diffusion training, own-checkpoint reload, geometry conditioning, API jobs and U
 submission, pinned downloads, selective extraction, interrupted extraction recovery,
 the port-9000 tunnel configuration, shared-connection ownership, incremental logs,
 GPU telemetry/graphs and data preparation isolated from optional model packages.
-A full Pandar128 training run and multi-GPU
+They also cover differentiable balanced/unbalanced transport with unequal masses,
+training-only references, every new controller, frozen-policy generation, E0–E5,
+labeled transfer budgets and two-process CPU DDP with OT enabled.
+A full Pandar128 training run and CUDA multi-GPU
 performance require the remote dataset and hardware. No large dataset or pretrained
 artifacts are bundled.

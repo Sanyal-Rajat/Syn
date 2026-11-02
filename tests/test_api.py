@@ -82,3 +82,27 @@ def test_failed_worker_traceback_is_available_in_logs_and_server_terminal(prepar
         log = client.get(f'/jobs/{identifier}/logs').json()['text']
         assert 'Traceback' in log and 'FileNotFoundError' in log
         assert 'FileNotFoundError' in capsys.readouterr().out
+
+
+def test_optional_ot_experiment_api_and_artifacts(prepared, tmp_path, monkeypatch):
+    monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
+    with TestClient(server.app) as client:
+        response = client.post('/jobs', json={'action': 'experiment', 'manifest': prepared, 'gpus': 0,
+            'channels': 8, 'height': 4, 'width': 16, 'window': 2, 'diffusion_steps': 10, 'sample_steps': 2,
+            'samples_per_trace': 1, 'ot': {'max_points': 8, 'min_samples': 2, 'iterations': 10},
+            'experiment': {'ablations': ['E0'], 'seeds': [0], 'synthetic_scenes': 1}})
+        assert response.status_code == 202, response.text
+        identifier = response.json()['id']
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            state = client.get(f'/jobs/{identifier}').json()
+            if state['status'] != 'running':
+                break
+            time.sleep(.1)
+        assert state['status'] == 'completed', state
+        result = client.get(f'/jobs/{identifier}/result').json()
+        assert result['selected_arm'] == 'E0'
+        assert result['gates']['task_transfer'] == 'not_evaluated'
+        archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{identifier}/artifacts').content))
+        assert {'experiment_plan.json', 'selection.json', 'ot_reference.npz',
+                'experiments/seed_0/E0/checkpoint.pt', 'scenes/train/000.npz'} <= set(archive.namelist())

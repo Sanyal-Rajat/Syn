@@ -8,6 +8,7 @@ import numpy as np
 from .pandar_reader import in_sensor_frame, load_arrays, sensor_transform, unpack_scan
 from .scan_to_range import infer_elevations, project
 from ..logs import get_logger
+from .annotations import load_poses, point_labels
 
 
 def digest(path):
@@ -57,14 +58,28 @@ def prepare(config, output, evidence):
                     raise ValueError(f'Cross-split leakage ({kind}): {trace}')
                 mapping[key] = split
             frames = load_arrays(path)
+            poses = load_poses(path, config.odometry_mode,
+                               np.linalg.inv(sensor_transform(config.calibration_file, 'vehicle'))) if config.odometry_mode != 'disabled' else None
+            if poses is not None and len(poses) < min(config.max_frames, len(frames)):
+                raise ValueError(f'{trace}: fewer odometry records than scan frames')
             entry = {'sequence_id': trace, 'source_file': str(path), 'source_sha256': source_hash,
                      'source_frames': len(frames), 'schema': str(np.asarray(frames[0]).dtype), 'frames': []}
             folder = output / split / trace
             folder.mkdir(parents=True, exist_ok=True)
+            entry['odometry_mode'] = config.odometry_mode if poses is not None else 'unavailable'
+            entry['labels_source'] = 'native Classification field; semantic validity requires confirmation'
+            if poses is not None:
+                entry['odometry_sha256'] = digest(Path(str(path).replace('_scan_list.npz', '_odom_list.npz')))
             for frame_index, raw in enumerate(frames[:config.max_frames]):
                 xyz, intensity = unpack_scan(raw)
                 projected = project(in_sensor_frame(xyz, transform), intensity, elevations, config.width,
-                                    config.max_range_m, config.beam_tolerance_deg, config.intensity_max)
+                                    config.max_range_m, config.beam_tolerance_deg, config.intensity_max, return_indices=True)
+                labels = point_labels(raw)
+                projected['labels'] = np.full(projected['valid'].shape, -1, dtype='int64')
+                if labels is not None:
+                    projected['labels'][projected['valid']] = labels[projected['point_index'][projected['valid']]]
+                if poses is not None:
+                    projected['world_from_sensor'] = poses[frame_index]
                 if not projected['valid'].any():
                     raise ValueError(f'{trace}:{frame_index}: zero valid rays; check coordinate frame, units and beams')
                 quantized = np.round(projected['range'] / .25).astype('int16')
@@ -111,7 +126,10 @@ def load_window(records, sensor_meta, sequence_id):
     for record in records:
         with np.load(record['path'], allow_pickle=False) as frame:
             frames.append({key: frame[key].copy() for key in ('range', 'valid', 'intensity', 'has_intensity', 'timestamp_ns')})
-    result = {key: np.stack([frame[key] for frame in frames]) for key in frames[0]}
+            for key in ('labels', 'world_from_sensor'):
+                if key in frame.files:
+                    frames[-1][key] = frame[key].copy()
+    result = {key: np.stack([frame[key] for frame in frames]) for key in set.intersection(*(set(frame) for frame in frames))}
     result['sequence_id'], result['sensor_meta'] = sequence_id, sensor_meta
     return result
 

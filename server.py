@@ -200,7 +200,8 @@ def artifacts(job_id: str):
         raise HTTPException(409, 'Complete the job before exporting artifacts')
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for filename in ('request.json', 'result.json', 'dependency-lock.json', 'profiles.json', 'training.json'):
+        for filename in ('request.json', 'result.json', 'dependency-lock.json', 'profiles.json', 'training.json',
+                         'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz'):
             if (path / filename).is_file():
                 archive.write(path / filename, filename)
         for pattern in ('*.pt', 'sample_*.npz'):
@@ -209,6 +210,10 @@ def artifacts(job_id: str):
         for file in (Path(__file__).parent / 'LICENSES').iterdir():
             if file.is_file():
                 archive.write(file, f'LICENSES/{file.name}')
+        for folder in ('experiments', 'scenes'):
+            for file in (path / folder).rglob('*'):
+                if file.is_file():
+                    archive.write(file, str(file.relative_to(path)))
     return Response(buffer.getvalue(), media_type='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="lidarpoc-{job_id}.zip"'})
 

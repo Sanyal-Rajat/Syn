@@ -43,7 +43,7 @@ class LidarDMAdapter(nn.Module):
         anchors = torch.stack((torch.where(known, normalized, 0), known.float()), dim=2).flatten(1, 2)
         return torch.cat((anchors, self.sensor_angles.expand(batch_size, -1, -1, -1)), dim=1)
 
-    def forward(self, batch):
+    def forward(self, batch, return_prediction=False):
         x0, mask = encode(batch, self.sensor_meta['max_range_m'])
         timesteps = torch.randint(0, self.config['diffusion_steps'], (len(x0),), device=x0.device)
         noise = torch.randn_like(x0)
@@ -69,13 +69,18 @@ class LidarDMAdapter(nn.Module):
             temporal = clean.sum() * 0
         loss = diffusion + self.config['geometry_weight'] * geometry + self.config['raydrop_weight'] * drop
         loss += self.config['temporal_weight'] * temporal
-        return {'loss': loss, 'diffusion': diffusion, 'geometry': geometry, 'raydrop': drop, 'temporal': temporal}
+        result = {'loss': loss, 'diffusion': diffusion, 'geometry': geometry, 'raydrop': drop, 'temporal': temporal}
+        if return_prediction:
+            result['prediction'] = {
+                'range': ((clean[:, :, 0] + 1) / 2 * math.log1p(self.sensor_meta['max_range_m'])).expm1(),
+                'valid': (clean[:, :, 1] * 4).sigmoid(), 'intensity': (clean[:, :, 2] + 1) / 2}
+        return result
 
     def train_step(self, real_batch):
         return self(real_batch)
 
     @torch.no_grad()
-    def sample(self, batch_size, conditioning=None, seed=0, steps=None):
+    def sample(self, batch_size, conditioning=None, seed=0, steps=None, guidance=1., force_cfg=False):
         device = self.sensor_angles.device
         generator = torch.Generator(device=device).manual_seed(seed)
         shape = (batch_size, 3 * self.config['window'], *self.sensor_angles.shape[-2:])
@@ -88,10 +93,14 @@ class LidarDMAdapter(nn.Module):
                                      or (geometry[known] < .1).any() or (geometry[known] > self.sensor_meta['max_range_m']).any()):
             raise ValueError('Conditioning needs matching masks and finite, valid ranges within sensor bounds')
         cond = self.conditioning(batch_size, geometry, known)
+        null_cond = self.conditioning(batch_size) if guidance != 1. or force_cfg else None
         scheduler = DDIMScheduler.from_config(self.scheduler.config)
         scheduler.set_timesteps(steps or self.config['sample_steps'], device=device)
         for timestep in scheduler.timesteps:
             prediction = self.unet(latent, cond, timestep).sample
+            if null_cond is not None:
+                unconditioned = self.unet(latent, null_cond, timestep).sample
+                prediction = unconditioned + guidance * (prediction - unconditioned)
             latent = scheduler.step(prediction, timestep, latent, generator=generator).prev_sample
         value = latent.clamp(-1, 1).reshape(batch_size, self.config['window'], 3, *shape[-2:])
         ranges = ((value[:, :, 0] + 1) / 2 * math.log1p(self.sensor_meta['max_range_m'])).expm1()

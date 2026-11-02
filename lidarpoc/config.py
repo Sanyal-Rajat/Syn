@@ -3,9 +3,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from .ot.config import ExperimentConfig, OTConfig
+
 
 class RunConfig(BaseModel):
-    action: Literal['prepare', 'train', 'generate'] = 'train'
+    action: Literal['prepare', 'train', 'generate', 'experiment'] = 'train'
     dataset_root: str = ''
     manifest: str = ''
     checkpoint: str = ''
@@ -42,6 +44,11 @@ class RunConfig(BaseModel):
     conditioning: str = ''
     profile_file: str = ''
     profile_name: str = 'ppo'
+    controller_file: str = ''
+    ot: OTConfig = Field(default_factory=OTConfig)
+    experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
+    warm_start: str = ''
+    odometry_mode: Literal['disabled', 'world_from_vehicle', 'previous_from_current'] = 'disabled'
 
     @model_validator(mode='after')
     def validate_inputs(self):
@@ -55,6 +62,8 @@ class RunConfig(BaseModel):
             raise ValueError('Provide the prepared split manifest path on the server')
         if self.action == 'generate' and not self.checkpoint:
             raise ValueError('Generation requires a checkpoint produced by this application')
+        if self.controller_file and (self.action != 'generate' or not self.conditioning):
+            raise ValueError('A learned generation controller requires Generate with a canonical conditioning NPZ')
         if self.action == 'train' and self.checkpoint:
             raise ValueError('First-version training starts from random initialization; pretrained loading is excluded')
         if len(set(self.methods)) != len(self.methods):

@@ -124,3 +124,20 @@ def test_prepare_downloads_into_project_folder_and_records_server_path(prepared,
     manifest = load_manifest(report['manifest'], verify_files=True)
     assert len(manifest['splits']['train']) == 8
     assert len(manifest['splits']['validation']) == len(manifest['splits']['test']) == 2
+
+
+def test_download_adds_odometry_without_extracting_camera_data_and_upgrades_receipts(tmp_path, publisher):
+    archives, calls = publisher
+    with zipfile.ZipFile(archives['train_part1.zip'], 'a') as archive:
+        archive.writestr('train/train_part1.zip/train_part1.zip_odom_list.npz', b'odometry')
+    root = tmp_path / 'data'
+    download.ensure_dataset(root, license_gate()['dataset'], lambda *_: None)
+    assert list(root.glob('**/*_odom_list.npz'))
+    assert not list(root.glob('**/*_video_list.npz'))
+    path = root / '.download.json'
+    receipt = json.loads(path.read_text())
+    receipt.pop('contents_version')
+    path.write_text(json.dumps(receipt))
+    download.ensure_dataset(root, license_gate()['dataset'], lambda *_: None)
+    assert len(calls) == 12
+    assert all(value == 2 for value in json.loads(path.read_text())['contents_version'].values())

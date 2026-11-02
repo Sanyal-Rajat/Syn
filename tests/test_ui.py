@@ -85,3 +85,17 @@ def test_connect_uses_an_existing_healthy_api_tunnel(remote, monkeypatch):
     next(button for button in app.button if button.label == 'Connect').click().run()
     assert not app.exception
     assert any('Using existing API tunnel' in message.value for message in app.success)
+
+
+def test_optional_ot_experiment_submits_typed_config_with_rl_preserved(remote):
+    from lidarpoc.config import RunConfig
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('OT + diffusion + RL experiment').run()
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/manifest.json').run()
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    request = RunConfig(**remote[-1])
+    assert request.action == 'experiment' and request.rl_enabled
+    assert 'sac' in request.experiment.controllers
+    assert request.experiment.seeds == [0, 1, 2]
+    assert request.ot.feature_scales[0] == 120

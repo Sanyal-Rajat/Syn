@@ -1,0 +1,27 @@
+{
+  "action": "experiment",
+  "manifest": "/path/on/server/to/prepared/manifest.json",
+  "gpus": 1,
+  "epochs": 5,
+  "sample_steps": 50,
+  "budget": 30,
+  "ot": {
+    "epsilon": 0.1,
+    "iterations": 60,
+    "min_samples": 4,
+    "max_points": 64,
+    "range_edges_m": [0, 30, 60, 120],
+    "feature_scales": [120, 1, 1.5707963267948966, 1, 1]
+  },
+  "experiment": {
+    "ablations": ["E0", "E1", "E2", "E3", "E4", "E5"],
+    "seeds": [0, 1, 2],
+    "controllers": ["fixed", "random_search", "bayesian", "cma_es", "sac", "contextual_bandit", "ppo"],
+    "synthetic_scenes": 4,
+    "controller_max_samples": 2,
+    "controller_seconds": 300,
+    "downstream": false,
+    "label_source_confirmed": false,
+    "label_budgets": [512, 2048]
+  }
+}

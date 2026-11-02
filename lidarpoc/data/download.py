@@ -30,7 +30,7 @@ def ensure_dataset(root, dataset, progress):
 
     for index, name in enumerate(ARCHIVES):
         records = receipt['archives'].get(name, [])
-        if records and all((root / row['path']).is_file() and (root / row['path']).stat().st_size == row['size']
+        if records and receipt.get('contents_version', {}).get(name) == 2 and all((root / row['path']).is_file() and (root / row['path']).stat().st_size == row['size']
                            for row in records):
             progress(f'reusing extracted {name}', index + 1, len(ARCHIVES))
             continue
@@ -45,9 +45,11 @@ def ensure_dataset(root, dataset, progress):
                      if not entry.is_dir() and entry.filename.endswith('_scan_list.npz')]
             if not scans:
                 raise ValueError(f'{name}: no LiDAR *_scan_list.npz files found')
+            scans += [entry for entry in archive.infolist() if not entry.is_dir() and entry.filename.endswith('_odom_list.npz')]
             for scan_index, entry in enumerate(scans):
                 filename = PurePosixPath(entry.filename).name
-                trace = filename.removesuffix('_scan_list.npz')
+                suffix = '_odom_list.npz' if filename.endswith('_odom_list.npz') else '_scan_list.npz'
+                trace = filename.removesuffix(suffix)
                 relative = Path(split) / trace / filename
                 if trace in ('', '.', '..') or relative in targets or any(
                         row['path'] == relative.as_posix() for other, rows in receipt['archives'].items()
@@ -65,6 +67,7 @@ def ensure_dataset(root, dataset, progress):
                 temporary.replace(target)
                 records.append({'path': relative.as_posix(), 'size': entry.file_size})
         receipt['archives'][name] = records
+        receipt.setdefault('contents_version', {})[name] = 2
         write_json(receipt_path, receipt)
         progress(f'extracted {name}', index + 1, len(ARCHIVES))
     return str(root)

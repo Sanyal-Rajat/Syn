@@ -23,7 +23,7 @@ def infer_elevations(scans, height=128, tolerance_deg=.15):
     return centers
 
 
-def project(xyz, intensity, elevations, width=512, max_range=120., tolerance_deg=.15, intensity_max=255.):
+def project(xyz, intensity, elevations, width=512, max_range=120., tolerance_deg=.15, intensity_max=255., return_indices=False):
     elevations = np.asarray(elevations)
     if elevations.ndim != 1 or not np.isfinite(elevations).all() or (np.diff(elevations) <= 0).any():
         raise ValueError('Beam elevations must be finite, strictly increasing radians')
@@ -51,9 +51,14 @@ def project(xyz, intensity, elevations, width=512, max_range=120., tolerance_deg
         if not np.isfinite(intensity).all():
             raise ValueError('Nonfinite intensity values')
         intensities[ring[index], column[index]] = np.clip(intensity[index] / intensity_max, 0, 1)
-    return {'range': ranges, 'valid': valid, 'intensity': intensities,
+    result = {'range': ranges, 'valid': valid, 'intensity': intensities,
             'has_intensity': np.bool_(intensity is not None),
             'rejected_fraction': 1 - np.count_nonzero(accepted) / max(1, len(xyz))}
+    if return_indices:
+        point_index = np.full(ranges.shape, -1, dtype='int64')
+        point_index[ring[index], column[index]] = index
+        result['point_index'] = point_index
+    return result
 
 
 def unproject(ranges, valid, elevations):

@@ -34,6 +34,8 @@ def provenance(manifest_path, config):
     return {'initialization': 'random', 'training_manifest_sha256': digest(manifest_path),
             'model_source_commit': license_gate()['model']['commit'],
             'adapter_sha256': digest(lidardm_adapter.__file__), 'unet_sha256': digest(lidardm_unet.__file__),
+            'library_sha256': {str(path.relative_to(Path(__file__).parent)): digest(path)
+                               for path in sorted(Path(__file__).parent.rglob('*.py'))},
             'license_manifest': license_gate(), 'runtime_dependency_lock': runtime_lock(), 'config': config}
 
 

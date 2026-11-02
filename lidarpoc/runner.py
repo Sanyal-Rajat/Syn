@@ -81,6 +81,9 @@ def run(config, directory):
         write_json(directory / 'result.json', report)
         progress('prepared', 1)
         return report
+    if config.action == 'experiment':
+        from .experiment import run_experiment
+        return run_experiment(config, directory)
     import torch
     from .gpu import hardware
 
@@ -124,7 +127,11 @@ def run(config, directory):
         if config.sample_steps > model.config['diffusion_steps']:
             raise ValueError('Sampling steps exceed the checkpoint diffusion schedule')
         model.config['sample_steps'] = config.sample_steps
-        generated = generate(model, config.samples_per_trace, config.seed, conditioning)
+        if config.controller_file:
+            from .ot.generate import controlled_generate
+            generated = controlled_generate(model, config)
+        else:
+            generated = generate(model, config.samples_per_trace, config.seed, conditioning)
         if config.profile_file:
             profile = json.loads(Path(config.profile_file).read_text())['profiles'][config.profile_name]
             generated = apply(generated, profile['theta'], config.seed)
@@ -146,6 +153,7 @@ def run(config, directory):
                   'conditioning': config.conditioning or None, 'pretrained_weights_used': False}
         report['geometry'] = geometry
         report['calibration_profile'] = config.profile_name if config.profile_file else 'uncalibrated'
+        report['generation_controller'] = config.controller_file or None
         write_json(directory / 'result.json', report)
         progress('completed', 1)
         return report
