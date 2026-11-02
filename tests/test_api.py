@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import server
 
 
-def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch):
+def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
     with TestClient(server.app) as client:
         assert client.get('/health').status_code == 200
@@ -28,6 +28,10 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch):
         report = client.get(f'/jobs/{identifier}/result').json()
         assert report['pretrained_weights_used'] is False
         assert 'ppo' in report['profiles']
+        output = client.get(f'/jobs/{identifier}/logs').json()
+        assert 'Epoch metrics:' in output['text']
+        assert 'Starting ppo calibration' in output['text']
+        assert 'Epoch metrics:' in capsys.readouterr().out
         archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{identifier}/artifacts').content))
         assert {'checkpoint.pt', 'ppo_policy.pt', 'profiles.json', 'sample_000.npz'} <= set(archive.namelist())
         assert 'LICENSES/MODEL-MIT.txt' in archive.namelist()
@@ -57,3 +61,24 @@ def test_cancellation_and_rejected_inputs(prepared, tmp_path, monkeypatch):
         assert client.post(f'/jobs/{identifier}/cancel').status_code == 200
         process.wait(timeout=10)
         assert client.get(f'/jobs/{identifier}').json()['status'] == 'cancelled'
+
+
+def test_failed_worker_traceback_is_available_in_logs_and_server_terminal(prepared, tmp_path, monkeypatch, capsys):
+    from pathlib import Path
+    monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
+    with TestClient(server.app) as client:
+        response = client.post('/jobs', json={'action': 'prepare',
+            'dataset_root': str(Path(prepared).parents[1] / 'raw'), 'input_frame': 'sensor',
+            'elevations_file': str(tmp_path / 'missing-elevations.txt'), 'height': 4, 'width': 16})
+        assert response.status_code == 202, response.text
+        identifier = response.json()['id']
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            state = client.get(f'/jobs/{identifier}').json()
+            if state['status'] != 'running':
+                break
+            time.sleep(.1)
+        assert state['status'] == 'failed', state
+        log = client.get(f'/jobs/{identifier}/logs').json()['text']
+        assert 'Traceback' in log and 'FileNotFoundError' in log
+        assert 'FileNotFoundError' in capsys.readouterr().out

@@ -7,6 +7,7 @@ import numpy as np
 
 from .pandar_reader import in_sensor_frame, load_arrays, sensor_transform, unpack_scan
 from .scan_to_range import infer_elevations, project
+from ..logs import get_logger
 
 
 def digest(path):
@@ -49,6 +50,7 @@ def prepare(config, output, evidence):
     for split, paths in files.items():
         for path in paths:
             trace = path.name.removesuffix('_scan_list.npz')
+            get_logger().info('Preparing %s trace %s', split, trace)
             source_hash = digest(path)
             for mapping, key, kind in [(trace_splits, trace, 'trace'), (source_splits, source_hash, 'source hash')]:
                 if key in mapping and mapping[key] != split:
@@ -76,6 +78,7 @@ def prepare(config, output, evidence):
             if len(entry['frames']) < config.window:
                 raise ValueError(f'{trace}: fewer frames than the temporal window')
             manifest['splits'][split].append(entry)
+            get_logger().info('Prepared %s: %d/%d frames', trace, len(entry['frames']), len(frames))
             del frames
     target = output / 'manifest.json'
     target.write_text(json.dumps(manifest, indent=2))

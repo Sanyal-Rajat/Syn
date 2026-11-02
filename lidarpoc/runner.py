@@ -1,12 +1,12 @@
 """Remote prepare/train/generate workflows and held-out LiDAR comparison."""
 import argparse
+from functools import partial
 import json
 from pathlib import Path
 import subprocess
 import sys
 
 import numpy as np
-import torch
 
 from .calibration import DEFAULT, NAMES, apply, calibrate
 from .config import RunConfig
@@ -14,11 +14,12 @@ from .data.download import ensure_dataset
 from .data.scan_to_range import unproject
 from .data.split_manifest import load_manifest, load_window, prepare, windows
 from .eval.domain_metrics import bootstrap, compare, describe
-from .gpu import hardware
 from .io import write_json
+from .logs import get_logger, progress as log_progress
 from .methods.empirical import sample as empirical_sample
-from .models.lidardm_adapter import LidarDMAdapter
 from .provenance import license_gate, runtime_lock, validate_checkpoint
+
+LOGGER = get_logger()
 
 
 def read_examples(manifest, split, window, per_trace):
@@ -40,6 +41,7 @@ def generate(model, count, seed=0, conditioning=None, has_intensity=True):
         sample['has_intensity'] = np.asarray([has_intensity] * model.config['window'])
         sample['max_range_m'] = float(model.sensor_meta['max_range_m'])
         result.append(sample)
+        LOGGER.info('Generated sample %d/%d', index + 1, count)
     return result
 
 
@@ -63,8 +65,8 @@ def run(config, directory):
     write_json(directory / 'request.json', config.model_dump())
     evidence = license_gate()
     write_json(directory / 'dependency-lock.json', runtime_lock())
-    progress = lambda stage, done=0, total=1: write_json(directory / 'progress.json',
-                                                       {'stage': stage, 'completed': done, 'total': total})
+    progress = partial(log_progress, directory)
+    LOGGER.info('Starting %s; artifacts: %s', config.action, directory)
     if config.action == 'prepare':
         config = config.model_copy(update={'dataset_root': ensure_dataset(config.dataset_root, evidence['dataset'], progress)})
         write_json(directory / 'request.json', config.model_dump())
@@ -79,6 +81,9 @@ def run(config, directory):
         write_json(directory / 'result.json', report)
         progress('prepared', 1)
         return report
+    import torch
+    from .gpu import hardware
+
     manifest = load_manifest(config.manifest, verify_files=True)
     license_gate(manifest)
     if config.action == 'train':
@@ -100,6 +105,8 @@ def run(config, directory):
         checkpoint_path = directory / 'checkpoint.pt'
     else:
         checkpoint_path = Path(config.checkpoint).expanduser().resolve()
+    from .models.lidardm_adapter import LidarDMAdapter
+
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
     validate_checkpoint(checkpoint, config.manifest)
     device = 'cuda:0' if config.gpus and torch.cuda.is_available() else 'cpu'

@@ -13,17 +13,20 @@ from threading import RLock, Thread
 from uuid import uuid4
 import zipfile
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from lidarpoc.config import RunConfig
 from lidarpoc.data.download import DATASET_ROOT
 from lidarpoc.io import write_json as save
+from lidarpoc.logs import get_logger, read_log, relay_output
+from lidarpoc.telemetry import gpu_usage
 
 ROOT = Path(os.environ.get('LIDARPOC_RUNS', Path(__file__).parent / 'runs')).expanduser().resolve()
 PROCESSES = {}
 LOCK = RLock()
+LOGGER = get_logger()
 
 
 def job_dir(job_id):
@@ -78,6 +81,11 @@ def health():
     return {'status': 'ok', 'hardware': system_info(), 'dataset_root': str(DATASET_ROOT)}
 
 
+@app.get('/metrics/gpu')
+def metrics():
+    return gpu_usage()
+
+
 class DatasetRequest(BaseModel):
     root: str = ''
 
@@ -91,16 +99,17 @@ def inspect(request: DatasetRequest):
         raise HTTPException(422, str(error)) from error
 
 
-def monitor(job_id, process):
-    code = process.wait()
+def monitor(job_id, process, directory):
+    code = relay_output(process, directory / 'worker.log')
     with LOCK:
-        path = ROOT / job_id / 'state.json'
+        path = directory / 'state.json'
         state = json.loads(path.read_text())
         if state['status'] == 'running':
             state['status'] = 'completed' if code == 0 and (path.parent / 'result.json').is_file() else 'failed'
             state['returncode'] = code
             save(path, state)
         PROCESSES.pop(job_id, None)
+        LOGGER.info('Job %s: %s (exit %s)', job_id, state['status'], code)
 
 
 @app.post('/jobs', status_code=202)
@@ -121,18 +130,23 @@ def start(config: RunConfig):
         state = {'id': job_id, 'status': 'running', 'action': config.action}
         save(path / 'state.json', state)
         try:
-            with (path / 'worker.log').open('w') as log:
-                process = subprocess.Popen([sys.executable, '-u', '-m', 'lidarpoc.runner',
-                                             '--request', str(path / 'request.json'), '--output', str(path)],
-                                            cwd=Path(__file__).parent, stdout=log, stderr=subprocess.STDOUT,
-                                            start_new_session=True)
+            process = subprocess.Popen([sys.executable, '-u', '-m', 'lidarpoc.runner',
+                                         '--request', str(path / 'request.json'), '--output', str(path)],
+                                        cwd=Path(__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                        env={**os.environ, 'PYTHONUNBUFFERED': '1'}, start_new_session=True)
         except OSError as error:
             state['status'] = 'failed'
             save(path / 'state.json', state)
             raise HTTPException(500, str(error)) from error
         PROCESSES[job_id] = process
-        Thread(target=monitor, args=(job_id, process), daemon=True).start()
+        LOGGER.info('Starting %s job %s; log: %s', config.action, job_id, path / 'worker.log')
+        Thread(target=monitor, args=(job_id, process, path), daemon=True).start()
     return state
+
+
+@app.get('/jobs/{job_id}/logs')
+def logs(job_id: str, offset: int = Query(0, ge=0), limit: int = Query(65536, ge=4, le=262144)):
+    return read_log(job_dir(job_id) / 'worker.log', offset, limit)
 
 
 @app.get('/jobs')
@@ -167,6 +181,7 @@ def cancel(job_id: str):
         state['status'] = 'cancelled'
         save(path / 'state.json', state)
         stop_process(process)
+        LOGGER.info('Cancelling job %s', job_id)
     return state
 
 
@@ -200,4 +215,4 @@ def artifacts(job_id: str):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=9000, workers=1)
+    uvicorn.run(app, host='127.0.0.1', port=9000, workers=1, access_log=False)

@@ -8,6 +8,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from lidarpoc.logs import get_logger, sync_remote_log
+
+LOGGER = get_logger()
+
 st.set_page_config(page_title='Pandar128 generation', layout='wide')
 st.title('Pandar128 LiDAR generation')
 st.caption('LidarDM range-image adaptation · random-initialized diffusion · PPO calibration · remote compute over SSH')
@@ -20,12 +24,16 @@ with st.sidebar:
         host = st.text_input('SSH host or configured alias')
         user = st.text_input('SSH user (optional for an alias)')
         key = st.text_input('Private key path on this client')
+        control_socket = st.text_input('Existing SSH control socket (optional)',
+                                       help='Use an existing ControlMaster connection. Supply its absolute socket path.')
         ssh_port = st.number_input('SSH port', 1, 65535, 22)
         remote_port = st.number_input('Remote API port', 1024, 65535, 9000)
         a, b, c = st.columns(3)
         command = 'start' if a.button('Connect') else 'status' if b.button('Status') else 'stop' if c.button('Close') else None
         if command:
             args = ['bash', str(Path(__file__).with_name('ssh_tunnel.sh')), command, '-l', str(local_port)]
+            if control_socket:
+                args += ['-S', control_socket]
             if command == 'start':
                 args += ['-H', host, '-P', str(ssh_port), '-p', str(remote_port)]
                 if user:
@@ -33,10 +41,24 @@ with st.sidebar:
                 if key:
                     args += ['-k', key]
             try:
-                response = subprocess.run(args, capture_output=True, text=True, timeout=15)
-                (st.success if response.returncode == 0 else st.error)(response.stdout + response.stderr)
+                connected = False
+                if command == 'start':
+                    try:
+                        probe = httpx.request('GET', endpoint + '/health', timeout=2, trust_env=False)
+                        connected = probe.is_success and probe.json().get('status') == 'ok'
+                    except (httpx.HTTPError, ValueError):
+                        pass
+                if connected:
+                    message = f'Using existing API tunnel at {endpoint}'
+                    st.success(message)
+                    LOGGER.info(message)
+                else:
+                    response = subprocess.run(args, capture_output=True, text=True, timeout=15)
+                    (st.success if response.returncode == 0 else st.error)(response.stdout + response.stderr)
+                    LOGGER.info('SSH %s: %s%s', command, response.stdout, response.stderr)
             except (OSError, subprocess.TimeoutExpired) as error:
                 st.error(str(error))
+                LOGGER.error('SSH %s: %s', command, error)
 
 
 def api(method, path, **kwargs):
@@ -119,8 +141,40 @@ with configure:
             state = api('POST', '/jobs', json=config).json()
             st.session_state['job_id'] = state['id']
             st.success(f"Started {state['id'][:12]}. Open Monitor and results.")
+            LOGGER.info('Submitted remote %s job %s', action, state['id'])
         except httpx.HTTPError as error:
             st.error(error.response.text if isinstance(error, httpx.HTTPStatusError) else str(error))
+            LOGGER.error('Job submission failed: %s', error)
+
+
+@st.fragment(run_every=2)
+def gpu_monitor():
+    st.subheader('Remote GPU usage')
+    try:
+        snapshot = api('GET', '/metrics/gpu').json()
+        if snapshot['error']:
+            st.info(f"GPU monitoring unavailable: {snapshot['error']}")
+        if not snapshot['gpus']:
+            if not snapshot['error']:
+                st.info('No NVIDIA GPUs were detected on the server.')
+            return
+        cache = f'gpu_history:{endpoint}'
+        rows = [{'time': snapshot['timestamp'], 'gpu': f"GPU {gpu['id']}",
+                 'utilization_percent': gpu['utilization_percent'], 'memory_used_gb': gpu['memory_used_gb']}
+                for gpu in snapshot['gpus']]
+        history = [row for row in st.session_state.get(cache, []) if row['time'] > snapshot['timestamp'] - 600]
+        history = (history + rows)[-300 * len(rows):]
+        st.session_state[cache] = history
+        frame = pd.DataFrame(history)
+        frame['time'] = pd.to_datetime(frame['time'], unit='s', utc=True)
+        utilization, memory = st.columns(2)
+        utilization.caption('GPU utilization (%)')
+        utilization.line_chart(frame, x='time', y='utilization_percent', color='gpu')
+        memory.caption('GPU memory used (GiB)')
+        memory.line_chart(frame, x='time', y='memory_used_gb', color='gpu')
+        st.dataframe(pd.DataFrame(snapshot['gpus']), hide_index=True)
+    except httpx.HTTPError as error:
+        st.info(f'GPU monitoring connection interrupted: {error}')
 
 
 @st.fragment(run_every=2)
@@ -145,8 +199,11 @@ def monitor():
                 st.rerun(scope='fragment')
             if state.get('training'):
                 st.line_chart(pd.DataFrame(state['training']).set_index('epoch'))
-        with st.expander('Server log', expanded=state['status'] == 'failed'):
-            st.code(state.get('log', 'Waiting for worker output'))
+        cursor = st.session_state.setdefault(f'log:{endpoint}:{job_id}', {})
+        log = sync_remote_log(api, job_id, cursor)
+        st.subheader('Live processing log')
+        with st.container(height=320):
+            st.code(log or 'Waiting for worker output', language='log')
         if state['status'] != 'completed':
             return
         cache = f'{endpoint}:{job_id}'
@@ -186,4 +243,5 @@ def monitor():
 
 
 with results:
+    gpu_monitor()
     monitor()

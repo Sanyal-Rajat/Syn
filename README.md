@@ -12,13 +12,24 @@ external asset banks or LoRA bases are loaded or downloaded.
 ## Run
 
 Copy this directory to the remote server. Install a PyTorch build appropriate for
-its GPUs, then install `requirements-server.txt` in a Python 3.11+ environment:
+its GPUs, then install `requirements-server.txt` in a separate Python 3.11+ server
+environment. Create and activate that environment before installing the GPU build:
 
 ```bash
+python3 -m venv .venv-server
+source .venv-server/bin/activate
+# Install your GPU-compatible PyTorch build here, then:
 python -m pip install -r requirements-server.txt
 python server.py
-# Equivalent: uvicorn server:app --host 127.0.0.1 --port 9000 --workers 1
+# Equivalent: uvicorn server:app --host 127.0.0.1 --port 9000 --workers 1 --no-access-log
 ```
+
+Dataset preparation imports its data libraries independently of Torch/Diffusers.
+Training and generation load the model stack when needed. This application uses
+standard AdamW and its own PPO; PEFT, Transformers and bitsandbytes are not required
+server dependencies. If a shared environment raises `HybridCache` import errors or
+a missing `libbitsandbytes_cuda130.so`, use the separate environment above rather
+than inheriting those incompatible optional packages.
 
 On the client, only the UI dependencies are required:
 
@@ -50,6 +61,50 @@ change the server's SSH daemon. The tunnel forwards between loopback addresses. 
 the browser or tunnel does not stop remote jobs. Cancellation stops the job's
 process group, including its training workers. API shutdown stops active jobs.
 Use one Uvicorn worker. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact storage.
+
+## Logs, GPU graphs and existing SSH connections
+
+Worker stdout/stderr is printed immediately in the server terminal and saved to
+`runs/<job_id>/worker.log`. **Monitor and results** shows a live processing log and
+prints each new chunk in the client's Streamlit terminal. Byte cursors prevent
+reprinting history on every refresh. Logs include preparation, training batches,
+epoch metrics, generation, calibration evaluations and uncaught tracebacks. The
+browser retains the latest 64 KiB; the server retains the complete worker log.
+`GET /jobs/{job_id}/logs?offset=0` exposes the same incremental stream.
+
+GPU utilization and used VRAM graphs refresh every two seconds, including while
+no job is running. The UI retains up to ten minutes per browser session. A live
+table includes GPU names/UUIDs, total VRAM, temperature and power where supported.
+These are host-wide physical GPU metrics, not per-job counters. Only the server
+needs `nvidia-ml-py`, NVIDIA's maintained NVML bindings; the package is included in
+`requirements-server.txt`. CPU/driverless hosts report monitoring unavailability
+without blocking jobs. Unsupported fields remain unknown, rather than showing zero.
+
+The UI reuses an API tunnel already responding at its configured endpoint. The
+tunnel helper also reuses an existing SSH `ControlMaster` from your SSH
+`ControlPath` configuration, or from an explicit `-S` socket path. In the UI,
+enter that absolute path in **Existing SSH control socket (optional)**. Closing
+the app's forward preserves the shared SSH session. An explicit socket must
+already have a running master; the helper reports an error if it is unavailable.
+
+For a connection started with a control socket, a second client terminal can add
+the application's forward over the same connection:
+
+```bash
+# Client terminal 1: start a reusable login once, or use your existing master
+ssh -M -S "$HOME/.ssh/syn-control" -o ControlPersist=600 \
+  -i /path/to/your-key.pem YOUR_USER@YOUR_SERVER
+
+# Client terminal 2: attach forwarding to that connection
+bash ssh_tunnel.sh start -H YOUR_SERVER -u YOUR_USER -S "$HOME/.ssh/syn-control"
+
+# Remove only the app's forwarding; keep the shared login
+bash ssh_tunnel.sh stop
+```
+
+A plain `ssh -i` login without a control socket needs a new multiplexed login
+before the helper can share it. OpenSSH describes this behavior under
+[ControlMaster](https://man.openbsd.org/ssh_config.5#ControlMaster).
 
 ## Data and experiments
 
@@ -141,7 +196,9 @@ reuse. The other `data/` modules handle NPZ, transforms, projection and splits. 
 LidarDM adapter and masking. `methods/` keeps each calibration method independent.
 `train.py` handles optimization/DDP; `calibration.py` handles PPO's environment;
 `eval/domain_metrics.py` holds metrics. `runner.py` orchestrates these libraries.
-`server.py` only manages remote jobs, and `app.py` is a thin client.
+`logs.py` handles process output, progress and log cursors; `telemetry.py` reads
+NVML independently of the training stack. `server.py` manages remote jobs, and
+`app.py` is a thin client.
 
 GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 `PINNs/gpu_optimizer.py` and `PINNs/sandbox_optimizer_lib.py`. The tunnel adapts
@@ -159,6 +216,8 @@ Tests use small synthetic fixtures in the publisher's scan schema. They exercise
 projection/masks, split and checkpoint gates, all calibration methods, real random
 diffusion training, own-checkpoint reload, geometry conditioning, API jobs and UI
 submission, pinned downloads, selective extraction, interrupted extraction recovery,
-and the port-9000 tunnel configuration. A full Pandar128 training run and multi-GPU
+the port-9000 tunnel configuration, shared-connection ownership, incremental logs,
+GPU telemetry/graphs and data preparation isolated from optional model packages.
+A full Pandar128 training run and multi-GPU
 performance require the remote dataset and hardware. No large dataset or pretrained
 artifacts are bundled.

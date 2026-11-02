@@ -14,6 +14,7 @@ from .config import RunConfig
 from .data.split_manifest import load_manifest, load_window, windows
 from .gpu import auto_configure_training
 from .io import write_json
+from .logs import get_logger, progress
 from .models.lidardm_adapter import LidarDMAdapter
 from .provenance import license_gate, provenance
 
@@ -80,6 +81,9 @@ def train(config, output):
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
         proof = provenance(config.manifest, config.model_dump())
+        if rank == 0:
+            get_logger().info('Training on %s with %d worker(s), %d training windows, batch size %d',
+                              device, int(os.environ.get('WORLD_SIZE', '1')), len(train_data), batch_size)
         for epoch in range(config.epochs):
             if sampler is not None:
                 sampler.set_epoch(epoch)
@@ -102,6 +106,8 @@ def train(config, output):
                     scaler.update()
                     optimizer.zero_grad()
                 losses.append(float(components['loss'].detach()))
+                if rank == 0 and ((step + 1) % max(1, len(loader) // 20) == 0 or step + 1 == len(loader)):
+                    progress(output, f'epoch {epoch + 1}/{config.epochs}, loss={losses[-1]:.6f}', step + 1, len(loader))
             raw_model = model.module if distributed else model
             metric = torch.zeros(2, device=device)
             if rank == 0:
@@ -119,7 +125,7 @@ def train(config, output):
                 record = {'epoch': epoch + 1, 'train_loss': sum(losses) / len(losses), 'validation_loss': validation_loss}
                 history.append(record)
                 write_json(output / 'training.json', history)
-                print(json.dumps(record), flush=True)
+                get_logger().info('Epoch metrics: %s', json.dumps(record))
                 if validation_loss < best:
                     best = validation_loss
                     checkpoint = {'state_dict': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),

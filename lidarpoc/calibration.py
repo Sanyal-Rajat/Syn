@@ -4,6 +4,7 @@ import importlib
 import numpy as np
 
 from .eval.domain_metrics import describe, compare
+from .logs import get_logger
 
 NAMES = ('range_bias_m', 'range_noise_std_m', 'drop_probability', 'intensity_scale')
 BOUNDS = np.array([[-.1, .1], [0., .1], [0., .5], [.5, 1.5]])
@@ -55,10 +56,13 @@ class Objective:
         theta = decode(unit)
         self.last_components = compare(self.real, describe(apply(self.generated, theta, self.seed)), self.max_range)
         self.history.append({'evaluation': len(self.history) + 1, 'unit': np.clip(unit, 0, 1).tolist(), **self.last_components})
+        get_logger().info('Calibration evaluation %d/%d: loss=%.6f', len(self.history), self.budget,
+                          self.last_components['loss'])
         return self.last_components['loss']
 
 
 def calibrate(method, real, generated, validation_real, validation_generated, max_range, budget, seed=0, device='cpu'):
+    get_logger().info('Starting %s calibration on %s', method, device)
     objective = Objective(real, generated, max_range, budget, seed)
     objective(objective.initial)
     policy = importlib.import_module(f'lidarpoc.methods.{method}').optimize(objective, seed=seed, device=device)
