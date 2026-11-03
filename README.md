@@ -141,8 +141,12 @@ before the helper can share it. OpenSSH describes this behavior under
    fraction are logged and recorded under `sensor_meta.beam_fit` in the manifest.
    If inference still fails, check the coordinate frame or supply measured angles;
    retries reuse the completed downloads and extraction receipts.
-5. Run **Prepare Pandar128**, then copy the returned remote manifest path into the
-   training form. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
+5. Run **Prepare Pandar128**, then select Train, Generate or the OT experiment.
+   **Completed preparation** initially selects the latest available server manifest.
+   Choose an older preparation or enter a custom server path when needed; manual
+   selections persist across operations. Starting requires a nonempty manifest path.
+   Discovery excludes unfinished jobs and missing/corrupt manifests and also works
+   after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
    fingerprint is a heuristic, not a comprehensive scene-identity proof.
 6. Train. `gpus=0` selects CPU; `gpus>1` launches actual `torchrun`/DDP, one process

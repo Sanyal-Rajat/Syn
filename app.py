@@ -76,6 +76,48 @@ def json_setting(label, default):
         st.stop()
 
 
+def manifest_input():
+    try:
+        prepared = api('GET', '/dataset/prepared').json()
+    except httpx.HTTPError:
+        prepared = []
+        st.caption('Prepared dataset list unavailable. Enter a manifest path below, or update the remote API.')
+    paths = [row['manifest'] for row in prepared]
+    manual = 'Enter a server path manually'
+    saved_key, field_key, choice_key = (f'{name}:{endpoint}' for name in ('manifest_saved', 'manifest_field', 'manifest_choice'))
+    saved = st.session_state.setdefault(saved_key, {'path': '', 'manual': False})
+    if paths and not saved['path'] and not saved['manual']:
+        saved['path'] = paths[0]
+        st.session_state[field_key] = saved['path']
+        st.session_state[choice_key] = saved['path']
+    if field_key not in st.session_state:
+        st.session_state[field_key] = saved['path']
+    if st.session_state.get(choice_key) not in paths + [manual]:
+        st.session_state[choice_key] = saved['path'] if saved['path'] in paths else manual
+
+    def select():
+        chosen = st.session_state[choice_key]
+        path = '' if chosen == manual else chosen
+        st.session_state[saved_key].update(path=path, manual=chosen == manual)
+        st.session_state[field_key] = path
+
+    def edit():
+        path = st.session_state[field_key].strip()
+        st.session_state[saved_key].update(path=path, manual=True)
+        st.session_state[choice_key] = path if path in paths else manual
+
+    if prepared:
+        rows = {row['manifest']: row for row in prepared}
+        st.selectbox('Completed preparation', paths + [manual], key=choice_key, on_change=select,
+            format_func=lambda path: manual if path == manual else
+                f"{rows[path]['job_id'][:12]} · {rows[path]['height']}×{rows[path]['width']} · {rows[path]['traces']} traces",
+            help='The latest completed preparation is selected initially. You can choose another or enter a custom path.')
+    else:
+        st.info('Complete Prepare Pandar128 on this server, or enter an existing prepared manifest path below.')
+    return st.text_input('Prepared manifest path on the server', key=field_key,
+                         placeholder='/data/cache/manifest.json', on_change=edit).strip()
+
+
 try:
     health = api('GET', '/health').json()
 except httpx.HTTPError:
@@ -120,7 +162,7 @@ with configure:
             except httpx.HTTPError as error:
                 st.error(str(error))
     else:
-        config['manifest'] = st.text_input('Prepared manifest path on the server', key='manifest', placeholder='/data/cache/manifest.json')
+        config['manifest'] = manifest_input()
         left, middle, right = st.columns(3)
         config['gpus'] = left.number_input('Remote GPUs (0 = CPU)', 0, 16, min(1, len(health['hardware']['gpus'])))
         config['sample_steps'] = middle.number_input('Sampling steps', 2, 200, 50)
@@ -180,7 +222,8 @@ with configure:
                 config['experiment']['label_budgets'] = json_setting('Real label budgets (JSON)', [512, 2048])
                 for split, key in [('Training', 'scene_files'), ('Development', 'development_scene_files'), ('Test', 'test_scene_files')]:
                     config['experiment'][key] = [line.strip() for line in st.text_area(f'{split} canonical NPZ paths on server (one per line)').splitlines() if line.strip()]
-    if st.button('Start remote job', type='primary'):
+    can_start = action == 'prepare' or bool(config['manifest'])
+    if st.button('Start remote job', type='primary', disabled=not can_start):
         try:
             state = api('POST', '/jobs', json=config).json()
             st.session_state['job_id'] = state['id']

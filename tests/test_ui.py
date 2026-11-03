@@ -15,6 +15,8 @@ def remote(monkeypatch):
         path = url.removeprefix('http://127.0.0.2:9000')
         if path == '/health':
             result = {'status': 'ok', 'hardware': {'gpus': [], 'physical_cpus': 4, 'available_ram_gb': 8}}
+        elif path == '/dataset/prepared':
+            result = []
         elif path == '/metrics/gpu':
             result = {'timestamp': time.time(), 'error': None, 'gpus': [
                 {'id': 0, 'name': 'Test GPU', 'uuid': 'GPU-test', 'utilization_percent': 73,
@@ -99,3 +101,60 @@ def test_optional_ot_experiment_submits_typed_config_with_rl_preserved(remote):
     assert 'sac' in request.experiment.controllers
     assert request.experiment.seeds == [0, 1, 2]
     assert request.ot.feature_scales[0] == 120
+
+
+@pytest.fixture
+def prepared_remote(remote, monkeypatch):
+    original = httpx.request
+    choices = [{'job_id': 'b' * 32, 'manifest': '/remote/new/prepared/manifest.json', 'height': 128, 'width': 512, 'traces': 12},
+               {'job_id': 'c' * 32, 'manifest': '/remote/old/prepared/manifest.json', 'height': 128, 'width': 256, 'traces': 6}]
+
+    def request(method, url, **kwargs):
+        if url.endswith('/dataset/prepared'):
+            return httpx.Response(200, json=choices, request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    return remote, choices
+
+
+def test_empty_manifest_disables_submission_without_hiding_monitoring(remote):
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('OT + diffusion + RL experiment').run()
+    assert not app.exception
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    assert not remote
+    assert any('Complete Prepare Pandar128' in message.value for message in app.info)
+    assert len(app.get('vega_lite_chart')) + len(app.get('arrow_vega_lite_chart')) == 2
+
+
+def test_experiment_automatically_uses_latest_completed_preparation(prepared_remote):
+    from lidarpoc.config import RunConfig
+    submitted, choices = prepared_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('OT + diffusion + RL experiment').run()
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[0]['manifest']
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    request = RunConfig(**submitted[-1])
+    assert request.manifest == choices[0]['manifest'] and request.action == 'experiment'
+    assert request.rl_enabled and 'sac' in request.experiment.controllers
+
+
+def test_chosen_and_custom_manifests_persist_without_silent_replacement(prepared_remote):
+    submitted, choices = prepared_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Train diffusion + calibration').run()
+    next(field for field in app.selectbox if field.label == 'Completed preparation').set_value(choices[1]['manifest']).run()
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[1]['manifest']
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/custom/manifest.json').run()
+    app.radio[0].set_value('Prepare Pandar128').run()
+    app.radio[0].set_value('OT + diffusion + RL experiment').run()
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == '/remote/custom/manifest.json'
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert submitted[-1]['manifest'] == '/remote/custom/manifest.json'
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('   ').run()
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(field for field in app.selectbox if field.label == 'Completed preparation').set_value(choices[0]['manifest']).run()
+    assert not app.exception
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[0]['manifest']

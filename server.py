@@ -86,6 +86,12 @@ def metrics():
     return gpu_usage()
 
 
+@app.get('/dataset/prepared')
+def prepared():
+    from lidarpoc.data.prepared import prepared_manifests
+    return prepared_manifests(ROOT)
+
+
 class DatasetRequest(BaseModel):
     root: str = ''
 

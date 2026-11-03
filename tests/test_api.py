@@ -1,4 +1,7 @@
 import io
+import json
+import os
+from pathlib import Path
 import time
 import zipfile
 
@@ -106,3 +109,46 @@ def test_optional_ot_experiment_api_and_artifacts(prepared, tmp_path, monkeypatc
         archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{identifier}/artifacts').content))
         assert {'experiment_plan.json', 'selection.json', 'ot_reference.npz',
                 'experiments/seed_0/E0/checkpoint.pt', 'scenes/train/000.npz'} <= set(archive.namelist())
+
+
+def test_discovery_lists_only_completed_existing_preparations_after_restart(prepared, tmp_path, monkeypatch):
+    runs = tmp_path / 'runs'
+    monkeypatch.setattr(server, 'ROOT', runs)
+
+    def record(index, action='prepare', status='completed', manifest=prepared):
+        identifier = f'{index:032x}'
+        folder = runs / identifier
+        folder.mkdir(parents=True)
+        (folder / 'state.json').write_text(json.dumps({'id': identifier, 'action': action, 'status': status}))
+        (folder / 'result.json').write_text(json.dumps({'action': action, 'manifest': str(manifest)}))
+        os.utime(folder / 'state.json', (index + 1, index + 1))
+        return folder
+
+    record(0)
+    second = tmp_path / 'second-manifest.json'
+    second.write_text(Path(prepared).read_text())
+    latest = record(1, manifest=second)
+    record(2, manifest=tmp_path / 'missing.json')
+    record(3, status='failed')
+    record(4, action='train')
+    record(5, status='running')
+    broken = record(6)
+    (broken / 'state.json').write_text('{')
+    record(7, manifest=tmp_path / 'corrupt.json')
+    (tmp_path / 'corrupt.json').write_text('{}')
+    for index in range(8, 60):
+        record(index, status='failed')
+    # Discovery must not be limited to the latest 50 jobs or process memory.
+    # Remove the deliberately corrupt state before lifespan's existing recovery pass.
+    (broken / 'state.json').write_text(json.dumps({'id': broken.name, 'action': 'prepare', 'status': 'failed'}))
+    with TestClient(server.app) as client:
+        (broken / 'state.json').write_text('{')
+        rows = client.get('/dataset/prepared').json()
+        assert [row['manifest'] for row in rows] == [str(second), str(Path(prepared).resolve())]
+        assert rows[0]['job_id'] == latest.name and rows[0]['traces'] == 6
+        assert rows[0]['height'] == 4 and rows[0]['width'] == 16
+        # A missing manifest remains a server-side validation error, with no worker started.
+        assert client.post('/jobs', json={'action': 'experiment', 'manifest': ''}).status_code == 422
+    (broken / 'state.json').write_text(json.dumps({'id': broken.name, 'action': 'prepare', 'status': 'failed'}))
+    with TestClient(server.app) as client:
+        assert client.get('/dataset/prepared').json() == rows
