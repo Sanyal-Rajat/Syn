@@ -1,5 +1,4 @@
 """Freeze generator parameters; compare controls under the same metered budget."""
-import importlib
 import time
 
 import numpy as np
@@ -7,8 +6,8 @@ import torch
 
 from .environment import BudgetExhausted, SensorAdaptationEnv, decode
 from ..methods import contextual_bandit
-from ..methods.ppo import ActorCriticNetwork
-from ..methods.sac import Actor
+from ..methods.registry import optimize
+from ..rl.policy import apply_policy, load_actor
 from ..logs import get_logger
 from ..sampling import SamplingPool
 from .environment import score
@@ -48,7 +47,7 @@ class Renderer:
         return results
 
 
-def fit_controller(method, renderer, scenes, reference, sensor, ot, settings, budget, seed, device):
+def fit_controller(method, renderer, scenes, reference, sensor, ot, settings, budget, seed, device, rl=None):
     env = SensorAdaptationEnv(renderer, scenes, reference, sensor, ot, settings, budget, seed)
     env.reset(seed)
     policy = None
@@ -57,8 +56,8 @@ def fit_controller(method, renderer, scenes, reference, sensor, ot, settings, bu
             while env.remaining:
                 env(env.initial)
         else:
-            policy = importlib.import_module(f'lidarpoc.methods.{method}').optimize(
-                env, seed=seed, device=device, warmup=settings.sac_warmup, batch_size=settings.sac_batch_size)
+            policy = optimize(method, env, seed=seed, device=device, rl=rl,
+                              warmup=settings.sac_warmup, batch_size=settings.sac_batch_size)
     except BudgetExhausted:
         pass  # BO/CMA/random batches stop at the shared generation-call/time boundary.
     if device.startswith('cuda'):
@@ -71,20 +70,17 @@ def fit_controller(method, renderer, scenes, reference, sensor, ot, settings, bu
     result['denoiser_evaluations'] = renderer.denoiser_evaluations
     if method == 'ppo' and policy:
         policy = {'algorithm': 'ppo', 'state': policy}
+    if policy and 'updates' in policy:
+        result['learning_updates'] = policy['updates']
+        result['training_transitions'] = policy.get('transitions')
     return result, policy
 
 
 def controlled_bank(renderer, scenes, count, seed, profile=None, policy=None):
     unit = np.asarray(profile['unit'] if profile else [1 / 3, 0., 0., 0.], dtype='float32')
     actor = None
-    if policy and policy['algorithm'] == 'sac':
-        actor = Actor(policy['states'], policy['actions'])
-        actor.load_state_dict(policy['actor'])
-        actor.eval()
-    if policy and policy['algorithm'] == 'ppo':
-        actor = ActorCriticNetwork(9, 9)
-        actor.load_state_dict(policy['state'])
-        actor.eval()
+    if policy and policy['algorithm'] != 'contextual_bandit':
+        actor = load_actor(policy)
     samples, canonicals, requests = [], [], []
     inference_context = np.asarray(profile['last_context'], dtype='float32').copy() if profile else None
     for index in range(count):
@@ -98,18 +94,10 @@ def controlled_bank(renderer, scenes, count, seed, profile=None, policy=None):
             context[9] = float(known.mean())
             context[10] = float(scenes[scenario]['range'][known].mean() / renderer.model.sensor_meta['max_range_m']) if known.any() else 0.
             context[11] = scenario / max(1, len(scenes) - 1)
-            if policy['algorithm'] == 'sac':
-                with torch.no_grad():
-                    delta, _ = actor(torch.from_numpy(context)[None], deterministic=True)
-                chosen = np.clip(chosen + .2 * delta[0].numpy(), 0, 1)
-            elif policy['algorithm'] == 'contextual_bandit':
+            if policy['algorithm'] == 'contextual_bandit':
                 chosen = np.asarray(policy['profiles'][contextual_bandit.choose(policy, context)]).copy()
-            elif policy['algorithm'] == 'ppo':
-                with torch.no_grad():
-                    probabilities, _ = actor(torch.from_numpy(context[:9])[None])
-                action = int(probabilities.argmax())
-                if action < 8:
-                    chosen[action // 2] = np.clip(chosen[action // 2] + (.1 if action % 2 else -.1), 0, 1)
+            else:
+                chosen = apply_policy(policy, actor, context, chosen)
         controls = decode(chosen, len(scenes), 1)
         # Evaluation uses a common, fixed scenario mixture and one sample per call.
         controls.update(scenario=scenario, samples=1)

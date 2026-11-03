@@ -82,7 +82,7 @@ def development(task):
             renderer = Renderer(model, scenes['train'], sampler)
             renderer.reference, renderer.ot = reference, config.ot
             profile, policy = fit_controller(name[3:], renderer, scenes['train'], reference, sensor,
-                config.ot, settings, config.budget, seed, device)
+                config.ot, settings, config.budget, seed, device, config.rl)
             write_json(folder / 'controller.json', profile)
             bundle = {'profile': profile, 'policy': cpu_policy(policy), 'checkpoint_sha256': digest(checkpoint),
                 'manifest_sha256': digest(config.manifest), 'algorithm': name[3:],
@@ -92,6 +92,7 @@ def development(task):
             record.update(profile=profile, controller=str(folder / 'controller.pt'))
             costs.update({key: profile[key] for key in ('generation_calls', 'call_budget', 'elapsed_s',
                                                        'seconds_budget', 'denoiser_evaluations')})
+            costs.update({key: profile[key] for key in ('learning_updates', 'training_transitions') if key in profile})
             costs['allocated_controller_gpu_hours'] = profile['elapsed_s'] * config.gpus / 3600
         started = time.perf_counter()
         renderer = Renderer(model, scenes['validation'], sampler)

@@ -17,6 +17,7 @@ external asset banks or LoRA bases are loaded or downloaded.
 - [Prepare the dataset](#prepare-the-dataset)
 - [Automatic GPU scheduling](#automatic-gpu-scheduling)
 - [Training, calibration and generation](#training-calibration-and-generation)
+- [RL method library](#rl-method-library)
 - [OT, diffusion and RL experiments](#ot-diffusion-and-rl-experiments)
 - [Files and API](#files-and-api)
 - [PDF results reports](#pdf-results-reports)
@@ -270,10 +271,10 @@ surfaces to the configured tolerance. This is ray-space conditioning, not scene
 reconstruction. The original calibration metrics describe sensor-frame persistence;
 the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
-PPO is adapted from `on_policy_RL_Agents.py` and `networks_RL_Agents.py` in the
-requested existing project. SAC in that source is disabled; this update adds an
-independent working SAC implementation for the new experiment controls.
-PPO calibrates bounded range bias/noise, drop probability and intensity scale.
+The RL library adapts the working policy-gradient, deterministic-control and DQN
+agents from the requested existing project. SAC in that source is disabled;
+Syn retains its independent working SAC implementation. RL methods calibrate
+bounded range bias/noise, drop probability and intensity scale.
 Random search, Bayesian optimization and CMA-ES share the same evaluation budget
 and frozen generated samples. Rewards use training traces; five candidate profiles
 per method are checked on validation traces. Test arrays are opened for evaluation
@@ -288,7 +289,7 @@ cross-sensor transfer claim follows automatically from these statistics.
 
 Use **Generate** with an own `checkpoint.pt`, optionally its `profiles.json` and a
 profile name such as `ppo`. Exports include checkpoint provenance, runtime dependency
-lock, notices, PPO policy, calibrated profiles, metrics and numeric sample NPZ files.
+lock, notices, fitted RL policies, calibrated profiles, metrics and numeric sample NPZ files.
 Model checkpoints contain the source commit, adapter hashes, training-manifest hash,
 sensor configuration and license evidence. Foreign pretrained checkpoints are rejected.
 
@@ -300,6 +301,91 @@ python -m lidarpoc.runner --request configs/prepare.json --output runs/prepare
 python -m lidarpoc.runner --request configs/train.json --output runs/train
 ```
 
+## RL method library
+
+All RL implementations live in [`lidarpoc/rl/`](lidarpoc/rl/), with an independent
+`optimize()` entry point per method. Shared modules provide replay, n-step returns,
+bounded actions, training loops and frozen-policy loading. The UI and processing
+workflows use [`methods/registry.py`](lidarpoc/methods/registry.py); its method names
+and configuration types can be imported without loading Torch. Existing imports
+from `lidarpoc.methods.ppo` and `lidarpoc.methods.sac` remain supported.
+
+New method modules expose `optimize(objective, seed=0, device='cpu', config=None)`
+and return a policy bundle containing CPU tensors. The objective provides `dim`,
+`initial`, `remaining`, `history` and `observation(unit)` or `context(unit)`;
+`objective(unit)` records and returns a loss. An optional `last_reward` supplies
+shaped feedback. LiDAR-specific rewards and data processing stay in
+`calibration.py` and `ot/environment.py`.
+
+Every method below is selectable under **Calibration methods** and
+**Frozen-generator controllers**:
+
+| Method ID | Action / learning approach |
+| --- | --- |
+| `ppo` | Existing clipped policy optimization with discrete parameter adjustments |
+| `sac` | Existing squashed-Gaussian actor, twin critics and entropy-temperature learning |
+| `a2c` | Discrete advantage actor-critic with GAE and bootstrapped rollouts |
+| `reinforce` | Discrete Monte Carlo policy gradient |
+| `n_step_actor_critic` | Synchronous n-step actor-critic, adapted from the source's A3C-labelled class |
+| `ddpg` | Continuous deterministic actor with one critic and target networks |
+| `td3` | Continuous deterministic actor, twin critics, target smoothing and delayed actor updates |
+| `dqn` | Discrete Q-learning with uniform replay |
+| `enhanced_dqn` | Double DQN, dueling network and prioritized replay |
+| `n_step_dqn` | Double DQN with n-step return targets |
+| `c51` | Categorical distributional Q-learning with 51 return atoms |
+| `rainbow` | Source-style Double DQN + dueling + prioritized replay + n-step + C51; no NoisyNet component |
+
+Discrete methods choose one normalized parameter to increase/decrease by 0.1 or
+leave unchanged. DDPG, TD3 and SAC make bounded continuous adjustments of up to
+0.2. Calibration converts normalized controls to physical parameter bounds. E5
+uses guidance, dropout, scenario and sample-count controls; its scenario/sample
+coordinates are rounded to discrete choices. Evaluation keeps a fixed common
+scenario mixture and one sample per call. Policies are frozen before test use.
+
+The new replay methods learn once at least two replay transitions are available;
+their batch is `min(rl.batch_size, replay size)`. Random-action warmup is capped by
+half the initially available call budget. N-step tails flush at episode/budget
+boundaries. A2C/n-step actor-critic update at rollout boundaries, and REINFORCE at
+the end. Logs and exported policies record transition and learning-update counts.
+These adaptations allow learning at the default 30-call budget; a small budget
+does not establish convergence or improved fidelity.
+
+In the UI, open **Additional RL method settings**. In JSON requests, use:
+
+```json
+{
+  "methods": ["ppo", "a2c", "td3", "enhanced_dqn", "bayesian"],
+  "rl": {
+    "warmup": 4,
+    "batch_size": 16,
+    "replay_size": 10000,
+    "rollout_steps": 5,
+    "n_steps": 3,
+    "value_min": -20.0,
+    "value_max": 20.0
+  }
+}
+```
+
+This is a fragment to merge into a Train/Experiment request, not a complete job.
+For Experiment, select algorithms in `experiment.controllers`; top-level `methods`
+selects Train calibration methods. `rl` settings apply to the ten newly adapted
+methods. PPO retains its existing optimizer settings; SAC retains
+`experiment.sac_warmup` / `experiment.sac_batch_size` in E5 and its existing defaults
+in calibration. Set C51/Rainbow return support for the tested reward scale.
+
+New calibration policies are saved as `<method>_policy.pt`; E5 bundles are saved
+under `experiments/seed_<n>/E5_<method>/controller.pt`. Generate supports all frozen
+controller formats. Each selected RL controller gets a paired session comparison
+against the development-selected fixed/random/BO/CMA comparator, when available,
+under `gates.rl_comparisons`; the existing SAC field remains available. PDFs include
+the comparisons. No method is automatically removed based on a result.
+
+Independent methods/seeds use the existing GPU task scheduler, while each policy
+keeps its own ordered feedback. Source SAC/model-based stubs remain excluded.
+The source MultiAgentDQN wrapper duplicates independent agents and is covered by
+this scheduling approach. The synchronous n-step method is not asynchronous A3C.
+
 ## OT, diffusion and RL experiments
 
 Prepare the data, then choose **OT + diffusion + RL experiment** in the existing
@@ -307,7 +393,8 @@ client UI and enter the returned server manifest path. The original Train and
 Generate operations remain available. The new workflow runs E0–E5 across the
 selected seeds, including conditional debiased Sinkhorn, unequal-mass KL transport,
 geometry/temporal constraints and a frozen-generator controller comparison.
-SAC, contextual bandit, PPO, fixed controls, random search, BO and CMA-ES are available.
+All methods in the RL library, contextual bandit, fixed controls, random search,
+BO and CMA-ES are available. Existing default selections remain unchanged.
 
 For a headless run, edit the server manifest path and resource limits in
 `configs/experiment.json`, then run on the server:
@@ -371,7 +458,7 @@ files depend on the operation:
 | Operation | Main outputs relative to the job directory |
 | --- | --- |
 | Prepare | `prepared/manifest.json` and per-frame numeric caches |
-| Train | `checkpoint.pt`, `training.json`, `profiles.json`, `sample_000.npz`, resource records and any fitted PPO policy |
+| Train | `checkpoint.pt`, `training.json`, `profiles.json`, `sample_000.npz`, resource records and any fitted RL policies |
 | Generate | `sample_*.npz` and provenance in `result.json` |
 | Experiment | `experiments/`, `scenes/`, selection records and per-arm checkpoints/controllers |
 
@@ -408,7 +495,7 @@ running the updated server; it includes ReportLab.
 
 The PDF summarizes the selected arm/profile, held-out scores and exported 95%
 session confidence intervals, with a comparison chart. Experiment reports include
-OT components, return statistics, evidence gates, SAC/comparator findings,
+OT components, return statistics, evidence gates, RL/comparator findings,
 allocated compute, batch-size differences and limitations. Prepare reports show
 trace inventories; Train reports include loss history; Generate reports show
 sample counts and geometry results. Full detailed records remain in JSON.
@@ -449,7 +536,9 @@ Inspect `worker.log` and `resources.json` to confirm this job's assigned devices
 
 `lidarpoc/data/download.py` handles pinned downloads, selective extraction and
 reuse. The other `data/` modules handle NPZ, transforms, projection and splits. `models/` holds the
-LidarDM adapter and masking. `methods/` keeps each calibration method independent.
+LidarDM adapter and masking. `rl/` contains the RL methods and shared learning
+primitives; `methods/` contains the optimizer registry, black-box optimizers and
+PPO/SAC compatibility imports.
 `train.py` handles optimization/DDP; `tuning.py` profiles batch throughput;
 `scheduling.py` assigns independent tasks to GPU groups; `sampling.py` reuses
 per-GPU replicas and batches generation requests. `data/prepare_tasks.py` and

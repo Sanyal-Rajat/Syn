@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from ..methods.registry import ControllerMethod
+
 
 class OTConfig(BaseModel):
     conditional_weight: float = Field(0., ge=0, le=100)
@@ -44,7 +46,7 @@ class ExperimentConfig(BaseModel):
     ablations: list[Literal['E0', 'E1', 'E2', 'E3', 'E4', 'E5']] = Field(
         default_factory=lambda: ['E0', 'E1', 'E2', 'E3', 'E4', 'E5'], min_length=1)
     seeds: list[int] = Field(default_factory=lambda: [0, 1, 2], min_length=1, max_length=20)
-    controllers: list[Literal['fixed', 'random_search', 'bayesian', 'cma_es', 'sac', 'contextual_bandit', 'ppo']] = Field(
+    controllers: list[ControllerMethod] = Field(
         default_factory=lambda: ['fixed', 'random_search', 'bayesian', 'cma_es', 'sac'], min_length=1)
     scene_files: list[str] = Field(default_factory=list)
     development_scene_files: list[str] = Field(default_factory=list)

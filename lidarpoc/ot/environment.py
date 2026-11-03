@@ -5,13 +5,10 @@ import numpy as np
 import torch
 
 from ..logs import get_logger
+from ..rl import BudgetExhausted
 from .constraints import scene_metrics
 from .features import conditional_ot, features, mass_ot, return_mass, select
 from .reference import stack_samples
-
-
-class BudgetExhausted(RuntimeError):
-    pass
 
 
 def score(samples, reference, sensor, config, device='cpu'):

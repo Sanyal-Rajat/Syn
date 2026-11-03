@@ -1,10 +1,9 @@
 """RL and black-box calibration of bounded LiDAR realism parameters."""
-import importlib
-
 import numpy as np
 
 from .eval.domain_metrics import describe, compare
 from .logs import get_logger
+from .methods.registry import optimize
 
 NAMES = ('range_bias_m', 'range_noise_std_m', 'drop_probability', 'intensity_scale')
 BOUNDS = np.array([[-.1, .1], [0., .1], [0., .5], [.5, 1.5]])
@@ -50,6 +49,9 @@ class Objective:
         return np.r_[unit, [row['loss'], row['range_wasserstein_normalized'], row['return_rate_mae'],
                             row['intensity_wasserstein'] or 0., row['temporal_discrepancy'] or 0.]].astype('float32')
 
+    def context(self, unit):
+        return self.observation(unit)
+
     def __call__(self, unit):
         if not self.remaining:
             raise RuntimeError('Calibration evaluation budget exhausted')
@@ -61,11 +63,11 @@ class Objective:
         return self.last_components['loss']
 
 
-def calibrate(method, real, generated, validation_real, validation_generated, max_range, budget, seed=0, device='cpu'):
+def calibrate(method, real, generated, validation_real, validation_generated, max_range, budget, seed=0, device='cpu', rl=None):
     get_logger().info('Starting %s calibration on %s', method, device)
     objective = Objective(real, generated, max_range, budget, seed)
     objective(objective.initial)
-    policy = importlib.import_module(f'lidarpoc.methods.{method}').optimize(objective, seed=seed, device=device)
+    policy = optimize(method, objective, seed=seed, device=device, rl=rl)
     # Separate complete traces for reward fitting and checkpoint selection.
     validation = []
     target = describe(validation_real)
@@ -83,7 +85,7 @@ def calibration_task(task):
 
     device = 'cuda:0' if task['gpus'] and torch.cuda.is_available() else 'cpu'
     result = calibrate(task['method'], task['real'], task['generated'], task['validation_real'],
-        task['validation_generated'], task['max_range'], task['budget'], task['seed'], device)
+        task['validation_generated'], task['max_range'], task['budget'], task['seed'], device, task.get('rl'))
     policy = result.pop('policy', None)
     if policy:
         torch.save(policy, Path(task['output']) / f"{task['method']}_policy.pt")

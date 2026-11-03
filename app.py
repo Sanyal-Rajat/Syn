@@ -9,12 +9,13 @@ import pandas as pd
 import streamlit as st
 
 from lidarpoc.logs import get_logger, sync_remote_log
+from lidarpoc.methods.registry import CALIBRATION_METHODS, CONTROLLER_METHODS
 
 LOGGER = get_logger()
 
 st.set_page_config(page_title='Pandar128 generation', layout='wide')
 st.title('Pandar128 LiDAR generation')
-st.caption('LidarDM range-image adaptation · random-initialized diffusion · PPO calibration · remote compute over SSH')
+st.caption('LidarDM range-image adaptation · random-initialized diffusion · RL calibration · remote compute over SSH')
 
 with st.sidebar:
     st.subheader('Remote connection')
@@ -189,9 +190,9 @@ with configure:
                 1, 4096, 512 if config['auto_optimize'] else 8,
                 help='Automatic mode measures throughput up to this limit and keeps memory headroom.')
             config['window'] = right.number_input('Frames per temporal window', 1, 5, 2)
-            config['rl_enabled'] = st.checkbox('Run PPO calibration and optimizer comparisons' if action == 'train' else 'Enable experimental RL controllers', value=True)
+            config['rl_enabled'] = st.checkbox('Run RL calibration and optimizer comparisons' if action == 'train' else 'Enable experimental RL controllers', value=True)
             if action == 'train':
-                config['methods'] = st.multiselect('Calibration methods', ['ppo', 'random_search', 'bayesian', 'cma_es'],
+                config['methods'] = st.multiselect('Calibration methods', CALIBRATION_METHODS,
                                                    default=['ppo', 'random_search', 'bayesian'])
             config['budget'] = st.number_input('Calibration calls per method' if action == 'train' else 'Generation-call budget per controller', 6, 5000, 30)
             with st.expander('Training settings'):
@@ -200,6 +201,16 @@ with configure:
                 config['gradient_accumulation'] = st.number_input('Gradient accumulation', 1, 64, 1)
                 config['workers'] = st.number_input('DataLoader workers per GPU (-1 = auto)', -1, 16, -1)
                 config['lr'] = st.number_input('Learning rate', value=.0001, min_value=.000001, max_value=.01, format='%.6f')
+            with st.expander('Additional RL method settings'):
+                st.caption('Replay methods learn from two transitions and use batches capped by available replay. These settings apply to the newly added methods; SAC keeps its existing experiment settings.')
+                config['rl'] = {
+                    'warmup': st.number_input('RL random-action warmup', 0, 1000, 4),
+                    'batch_size': st.number_input('RL replay batch limit', 2, 256, 16),
+                    'rollout_steps': st.number_input('Actor-critic rollout steps', 1, 256, 5),
+                    'n_steps': st.number_input('DQN return steps', 1, 64, 3),
+                    'value_min': st.number_input('C51 minimum return support', -10000., 10000., -20.),
+                    'value_max': st.number_input('C51 maximum return support', -10000., 10000., 20.),
+                }
             st.caption(f"{'Maximum' if config['auto_optimize'] else 'Effective'} training batch: {config['batch_size'] * max(1, selected_gpus) * config['gradient_accumulation']} windows per optimizer step. Actual tuned batches appear in the logs.")
         config['seed'] = st.number_input('Seed', 0, 2147483647, 0)
         if action == 'experiment':
@@ -210,7 +221,7 @@ with configure:
                                             default=['E0', 'E1', 'E2', 'E3', 'E4', 'E5']),
                 'seeds': json_setting('Experiment seeds (JSON)', [0, 1, 2]),
                 'controllers': st.multiselect('Frozen-generator controllers',
-                    ['fixed', 'random_search', 'bayesian', 'cma_es', 'sac', 'contextual_bandit', 'ppo'],
+                    CONTROLLER_METHODS,
                     default=['fixed', 'random_search', 'bayesian', 'cma_es', 'sac']),
                 'synthetic_scenes': st.number_input('Procedural canonical scenes per split', 1, 100, 4),
                 'controller_seconds': st.number_input('Controller time budget per method (seconds)', 1., 86400., 300.),

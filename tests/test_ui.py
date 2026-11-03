@@ -125,6 +125,28 @@ def test_optional_ot_experiment_submits_typed_config_with_rl_preserved(remote):
     assert request.ot.feature_scales[0] == 120
 
 
+@pytest.mark.parametrize('operation,label,field', [
+    ('Train diffusion + calibration', 'Calibration methods', 'methods'),
+    ('OT + diffusion + RL experiment', 'Frozen-generator controllers', 'controllers'),
+])
+def test_all_rl_methods_are_selectable_and_settings_reach_server(remote, operation, label, field):
+    from lidarpoc.config import RunConfig
+    from lidarpoc.rl import RL_METHODS
+
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value(operation).run()
+    next(value for value in app.text_input if value.label == 'Prepared manifest path on the server').set_value('/remote/manifest.json').run()
+    choices = next(value for value in app.multiselect if value.label == label)
+    assert set(RL_METHODS) <= set(choices.options)
+    choices.set_value(list(RL_METHODS)).run()
+    next(value for value in app.number_input if value.label == 'RL replay batch limit').set_value(8).run()
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    config = RunConfig(**remote[-1])
+    actual = config.methods if field == 'methods' else config.experiment.controllers
+    assert actual == list(RL_METHODS) and config.rl.batch_size == 8
+
+
 @pytest.fixture
 def prepared_remote(remote, monkeypatch):
     original = httpx.request

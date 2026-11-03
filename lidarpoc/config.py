@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from .ot.config import ExperimentConfig, OTConfig
+from .methods.registry import CALIBRATION_METHODS, CalibrationMethod
+from .rl.config import RLConfig
 
 
 class RunConfig(BaseModel):
@@ -39,8 +41,9 @@ class RunConfig(BaseModel):
     gpus: int = Field(-1, ge=-1)
     seed: int = Field(0, ge=0, le=2**31 - 1)
     rl_enabled: bool = True
-    methods: list[Literal['ppo', 'random_search', 'bayesian', 'cma_es']] = Field(
-        default_factory=lambda: ['ppo', 'random_search', 'bayesian'], min_length=1, max_length=4)
+    methods: list[CalibrationMethod] = Field(
+        default_factory=lambda: ['ppo', 'random_search', 'bayesian'], min_length=1, max_length=len(CALIBRATION_METHODS))
+    rl: RLConfig = Field(default_factory=RLConfig)
     budget: int = Field(30, ge=6, le=5000)
     conditioning: str = ''
     profile_file: str = ''

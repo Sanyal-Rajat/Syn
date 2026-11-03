@@ -43,6 +43,13 @@ def test_analysis_preserves_selection_ci_session_units_and_rl(experiment_result)
     assert not any('% lower' in line for line in findings(experiment_result))
 
 
+def test_report_includes_new_rl_comparisons(experiment_result):
+    experiment_result['gates']['rl_comparisons'] = {
+        'td3': {'comparator': 'E5_bayesian', 'paired_test_session_gain': {'mean': .1, 'ci95': [.05, .15]},
+                'recommendation': 'retain_as_experimental'}}
+    assert any('td3 versus E5_bayesian' in line and '0.1000' in line for line in findings(experiment_result))
+
+
 @pytest.mark.parametrize('action', ['prepare', 'train', 'generate', 'experiment'])
 def test_pdf_export_for_every_workflow_is_valid_and_keeps_json(tmp_path, experiment_result, action):
     reports = {'experiment': experiment_result,

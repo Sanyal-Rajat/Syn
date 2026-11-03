@@ -94,6 +94,13 @@ def findings(report):
                         f"Positive gain favors SAC. Recommendation: {rl.get('recommendation')}. "
                         f"Matched call/time caps: {format_value(rl.get('matched_call_and_time_caps'))}. "
                         f"Methods removed: {format_value(rl.get('methods_removed'))}.")
+        for method, value in gates.get('rl_comparisons', {}).items():
+            if method == 'sac' and rl:
+                continue
+            gain = value.get('paired_test_session_gain', {})
+            text.append(f"{method} versus {value.get('comparator')}: paired test gain "
+                        f"{format_value(gain.get('mean'))}, 95% CI {format_value(gain.get('ci95'))}. "
+                        f"Positive gain favors {method}. Recommendation: {value.get('recommendation')}.")
     batches = {cost.get('training_resources', {}).get('batch_size_per_process')
                for arms in report.get('compute', {}).values() for cost in arms.values()}
     batches.discard(None)
@@ -260,6 +267,14 @@ def write_pdf(result_path, output=None):
                 sorted({c['training_resources']['world_size'] for c in values
                         if c.get('training_resources', {}).get('world_size') is not None}) or None]
                for name, values in costs.items()])
+        learned = [(name, values) for name, values in costs.items() if any('learning_updates' in c for c in values)]
+        if learned:
+            table(['Controller', 'Generation calls', 'Learning updates', 'Fitting transitions'],
+                  [[name, sum(c.get('generation_calls', 0) for c in values),
+                    sum(c.get('learning_updates', 0) for c in values),
+                    sum(c.get('training_transitions') or 0 for c in values) if
+                    all(c.get('training_transitions') is not None for c in values) else None]
+                   for name, values in learned])
         story.append(paragraph('GPU hours are elapsed allocated device time, not measured GPU busy time. '
                                'E5 arms include shared generator training; do not sum these rows as the experiment total. '
                                'Resource snapshots describe assigned workers and do not establish the total host GPU count. '

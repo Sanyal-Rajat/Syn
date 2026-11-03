@@ -12,6 +12,7 @@ from lidarpoc.data.split_manifest import load_manifest, load_window
 from lidarpoc.eval.domain_metrics import compare, describe
 from lidarpoc.models.lidardm_adapter import LidarDMAdapter
 from lidarpoc.models.masking import masked_mse
+from lidarpoc.methods.registry import CALIBRATION_METHODS
 from lidarpoc.provenance import license_gate, validate_checkpoint
 from lidarpoc.runner import read_examples, run
 
@@ -78,7 +79,7 @@ def test_leakage_and_provenance_gates(prepared, tmp_path):
         RunConfig(manifest=prepared, checkpoint='/some/other/weights.pt')
 
 
-@pytest.mark.parametrize('method', ['ppo', 'random_search', 'bayesian', 'cma_es'])
+@pytest.mark.parametrize('method', CALIBRATION_METHODS)
 def test_rl_and_baselines_are_real_budgeted_optimizers(prepared, method):
     manifest = load_manifest(prepared)
     real = read_examples(manifest, 'train', 2, 1)
@@ -90,6 +91,8 @@ def test_rl_and_baselines_are_real_budgeted_optimizers(prepared, method):
     assert np.isfinite(result['theta']).all()
     if method == 'ppo':
         assert result['policy']
+    elif method not in ('random_search', 'bayesian', 'cma_es'):
+        assert result['policy']['updates'] > 0
 
 
 def test_random_diffusion_training_sampling_and_conditioning(prepared, tmp_path):

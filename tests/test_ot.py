@@ -12,6 +12,8 @@ from lidarpoc.eval import downstream
 from lidarpoc.eval.gates import decisions
 from lidarpoc.eval.temporal import real_persistence
 from lidarpoc.methods.sac import SACAgent
+from lidarpoc.methods.registry import CONTROLLER_METHODS
+from lidarpoc.rl import RL_METHODS
 from lidarpoc.ot.config import ExperimentConfig, OTConfig
 from lidarpoc.ot.constraints import physical_loss, pose_temporal_loss, scene_metrics, warp_depth
 from lidarpoc.ot.features import conditional_ot, return_mass
@@ -168,7 +170,7 @@ def test_full_ot_matrix_controllers_and_no_test_fit_leakage(prepared, tmp_path, 
         epochs=1, batch_size=2, window=2, diffusion_steps=10, sample_steps=2, samples_per_trace=1, budget=6,
         ot=OTConfig(max_points=8, min_samples=2, iterations=10),
         experiment=ExperimentConfig(seeds=[0], synthetic_scenes=2, sac_warmup=1,
-            controllers=['fixed', 'random_search', 'bayesian', 'cma_es', 'sac', 'contextual_bandit', 'ppo']))
+            controllers=list(CONTROLLER_METHODS)))
     report = run(config, output)
     assert report['action'] == 'experiment' and report['legacy_workflows_retained']
     assert report['gates']['task_transfer'] == 'not_evaluated'
@@ -185,12 +187,36 @@ def test_full_ot_matrix_controllers_and_no_test_fit_leakage(prepared, tmp_path, 
     policy_path = output / 'experiments/seed_0/E5_sac/controller.pt'
     policy = torch.load(policy_path, weights_only=True)
     assert policy['policy']['updates'] > 0
+    assert set(RL_METHODS) <= set(report['gates']['rl_comparisons'])
     synthetic = output / 'scenes/test/000.npz'
     generated = run(RunConfig(action='generate', manifest=prepared,
         checkpoint=str(output / 'experiments/seed_0/E4/checkpoint.pt'), controller_file=str(policy_path),
         conditioning=str(synthetic), gpus=0, sample_steps=2, samples_per_trace=1), tmp_path / 'controlled_generation')
     assert generated['geometry']['new_surface_returns'] == 0
     assert generated['generation_controller'] == str(policy_path)
+    for method in RL_METHODS:
+        if method in ('ppo', 'sac'):
+            continue
+        path = output / f'experiments/seed_0/E5_{method}/controller.pt'
+        bundle = torch.load(path, weights_only=True)
+        assert bundle['policy']['updates'] > 0
+        generated = run(RunConfig(action='generate', manifest=prepared,
+            checkpoint=str(output / 'experiments/seed_0/E4/checkpoint.pt'), controller_file=str(path),
+            conditioning=str(synthetic), gpus=0, sample_steps=2, samples_per_trace=1),
+            tmp_path / f'generate_{method}')
+        assert generated['geometry']['new_surface_returns'] == 0
+
+
+def test_disabling_experimental_rl_excludes_every_rl_controller(prepared, tmp_path):
+    config = RunConfig(action='experiment', manifest=prepared, gpus=0, channels=8, height=4, width=16,
+        epochs=1, batch_size=2, window=2, diffusion_steps=10, sample_steps=2,
+        samples_per_trace=1, budget=6, rl_enabled=False,
+        ot=OTConfig(max_points=8, min_samples=2, iterations=10),
+        experiment=ExperimentConfig(ablations=['E0', 'E4', 'E5'], seeds=[0], synthetic_scenes=1,
+                                    controllers=list(CONTROLLER_METHODS)))
+    result = run(config, tmp_path / 'no_rl')
+    assert not any(f'E5_{method}' in result['session_intervals'] for method in (*RL_METHODS, 'contextual_bandit'))
+    assert 'E5_fixed' in result['session_intervals'] and 'E5_bayesian' in result['session_intervals']
 
 
 def test_labeled_experiment_uses_fixed_budgets_and_held_out_probes(prepared, tmp_path):

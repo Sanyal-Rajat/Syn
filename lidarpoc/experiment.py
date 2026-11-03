@@ -1,5 +1,4 @@
 """Additive E0–E5 experiment runner; freeze all choices before decoding real test arrays."""
-from collections import defaultdict
 from pathlib import Path
 import time
 import json
@@ -12,13 +11,14 @@ from .data.synthetic_scene import geometry_digest, scene_splits
 from .eval import downstream
 from .eval.gates import decisions
 from .eval.ot_metrics import session_intervals
-from .eval.domain_metrics import bootstrap
 from .io import write_json
 from .gpu import launch_training, resolve_gpus
 from .logs import progress
 from .models.lidardm_adapter import LidarDMAdapter
 from .ot.reference import build_reference, load_reference
 from .provenance import license_gate, provenance, validate_checkpoint
+from .rl import RL_METHODS
+from .rl.comparison import compare as compare_rl
 
 
 def cpu_policy(policy):
@@ -136,7 +136,7 @@ def run_experiment(config, directory):
     if 'E5' in settings.ablations:
         jobs = [{**base, 'seed': seed, 'name': f'E5_{method}'} for seed in settings.seeds
                 for method in settings.controllers
-                if config.rl_enabled or method not in ('sac', 'ppo', 'contextual_bandit')]
+                if config.rl_enabled or method not in (*RL_METHODS, 'contextual_bandit')]
         collect(map_tasks(tasks.development, jobs, config.gpus,
             on_done=lambda done, total: progress(directory, 'independent frozen-generator controllers', done, total)))
     if settings.downstream:
@@ -203,30 +203,12 @@ def run_experiment(config, directory):
         cost['calls_per_positive_development_gain'] = cost['total_generation_calls'] / gain if gain is not None and gain > 0 else None
     task_tests = [task_rows[seed] for seed in settings.seeds]
     gates = decisions([rows[selected] for rows in tests.values()], task_tests, selected, settings)
-    if 'E5_sac' in candidates and rl_comparator:
-        baseline = rl_comparator
-        improvement = selection_score(baseline) - selection_score('E5_sac')
-        by_session = defaultdict(list)
-        if settings.downstream:
-            for rows in task_tests:
-                for budget, values in rows['E5_sac'].items():
-                    base = {row['sequence_id']: row['mean_iou'] for row in rows[baseline][budget]}
-                    for row in values:
-                        by_session[row['sequence_id']].append(row['mean_iou'] - base[row['sequence_id']])
-        else:
-            for rows in tests.values():
-                base = {row['sequence_id']: row['gap'] for row in rows[baseline]['traces']}
-                for row in rows['E5_sac']['traces']:
-                    by_session[row['sequence_id']].append(base[row['sequence_id']] - row['gap'])
-        paired = bootstrap([float(np.mean(values)) for values in by_session.values()])
-        metered = [cost for rows in computations.values() for name, cost in rows.items() if name.startswith('E5_')]
-        matched = all(row['generation_calls'] == config.budget and row['elapsed_s'] <= settings.controller_seconds for row in metered)
-        material = improvement > settings.rl_min_improvement and paired['ci95'][0] > settings.rl_min_improvement and matched
-        gates['rl_development_comparison'] = {'comparator': baseline, 'primary_metric_improvement': improvement,
-                                             'material': material, 'paired_test_session_gain': paired,
-                                             'matched_call_and_time_caps': matched,
-                                             'recommendation': 'retain_as_experimental' if material else 'no_incremental_value_demonstrated',
-                                             'methods_removed': False}
+    comparisons = compare_rl(candidates, rl_comparator, selection_score, task_tests, tests,
+                             computations, config.budget, settings)
+    if comparisons:
+        gates['rl_comparisons'] = comparisons
+    if 'sac' in comparisons:
+        gates['rl_development_comparison'] = comparisons['sac']
     report = {'action': 'experiment', 'specification': plan['specification'], 'selected_arm': selected,
               'selection': selection, 'selection_sha256': digest(directory / 'selection.json'),
               'reference': reference_path, 'reference_sha256': digest(reference_path),

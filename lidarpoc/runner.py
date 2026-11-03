@@ -178,7 +178,8 @@ def _run(config, directory):
         jobs = [{'method': method, 'real': training, 'generated': calibration_generated,
                  'validation_real': validation, 'validation_generated': validation_generated,
                  'max_range': manifest['sensor_meta']['max_range_m'], 'budget': config.budget,
-                 'seed': config.seed, 'gpus': config.gpus, 'output': str(directory)} for method in config.methods]
+                 'seed': config.seed, 'gpus': config.gpus, 'rl': config.rl.model_dump(),
+                 'output': str(directory)} for method in config.methods]
         profiles.update(map_tasks(calibration_task, jobs, config.gpus,
             on_done=lambda done, total: progress('independent sensor calibration methods', done, total)))
         model.to(device)

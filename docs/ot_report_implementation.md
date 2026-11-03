@@ -123,6 +123,15 @@ tanh Gaussian actor, replay, twin critics, target networks and learned entropy
 temperature. The bandit chooses once per scenario with linear UCB. Existing PPO,
 random search, BO and CMA-ES are reused through the same environment.
 
+The isolated `lidarpoc/rl/` library also supplies A2C, REINFORCE, synchronous
+n-step actor-critic, DDPG, TD3, DQN, Enhanced DQN, n-step DQN, C51 and a source-style
+Rainbow variant. Each has an independent method entry point backed by shared
+replay/action/policy modules. The Rainbow variant omits NoisyNet; n-step
+actor-critic is synchronous. Newly adapted methods use the top-level `rl` settings,
+learn from replay batches capped by available transitions, and export update
+counts. Existing PPO/SAC policy formats remain readable. See the README's
+[RL method library](../README.md#rl-method-library) for method IDs and settings.
+
 Every generated sample consumes one call, including the initial baseline. Every
 experimental sample uses two denoiser passes per diffusion step for equal guidance
 cost accounting. The generator stays frozen. A method cannot exceed its call cap;
@@ -152,6 +161,9 @@ Repeated-seed results are averaged per independent real session before bootstrap
 RL value requires both development improvement and positive paired test-session
 gain against the frozen matched-budget comparator. No optimizer is removed if
 that hypothesis fails.
+Comparisons are exported per selected method in `gates.rl_comparisons`; the
+existing `rl_development_comparison` field retains the SAC comparison. Call/time
+cap checks use each method and its selected comparator.
 
 `result.json` includes sensor components, geometry, temporal support, labeled task
 results where enabled, label-efficiency curves, compute and decision gates. Artifact
