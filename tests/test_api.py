@@ -57,7 +57,11 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert 'Starting ppo calibration' in output['text']
         assert 'Epoch metrics:' in capsys.readouterr().out
         archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{identifier}/artifacts').content))
-        assert {'checkpoint.pt', 'ppo_policy.pt', 'profiles.json', 'sample_000.npz'} <= set(archive.namelist())
+        assert {'checkpoint.pt', 'ppo_policy.pt', 'profiles.json', 'sample_000.npz', 'result.pdf'} <= set(archive.namelist())
+        assert (server.ROOT / identifier / 'result.pdf').read_bytes().startswith(b'%PDF-')
+        pdf = client.get(f'/jobs/{identifier}/report')
+        assert pdf.status_code == 200 and pdf.headers['content-type'] == 'application/pdf'
+        assert pdf.content.startswith(b'%PDF-')
         assert 'LICENSES/MODEL-MIT.txt' in archive.namelist()
         generation = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
             'checkpoint': report['checkpoint'], 'gpus': 0, 'sample_steps': 2, 'samples_per_trace': 1,
@@ -72,6 +76,7 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
             time.sleep(.1)
         assert state['status'] == 'completed', state
         assert client.get(f'/jobs/{generation_id}/result').json()['calibration_profile'] == 'ppo'
+        assert client.get(f'/jobs/{generation_id}/report').content.startswith(b'%PDF-')
 
 
 def test_cancellation_and_rejected_inputs(prepared, tmp_path, monkeypatch):
@@ -82,6 +87,7 @@ def test_cancellation_and_rejected_inputs(prepared, tmp_path, monkeypatch):
         response = client.post('/jobs', json={'manifest': prepared, 'gpus': 0})
         identifier = response.json()['id']
         process = server.PROCESSES[identifier]
+        assert client.get(f'/jobs/{identifier}/report').status_code == 409
         assert client.post(f'/jobs/{identifier}/cancel').status_code == 200
         process.wait(timeout=10)
         assert client.get(f'/jobs/{identifier}').json()['status'] == 'cancelled'
@@ -127,9 +133,33 @@ def test_optional_ot_experiment_api_and_artifacts(prepared, tmp_path, monkeypatc
         result = client.get(f'/jobs/{identifier}/result').json()
         assert result['selected_arm'] == 'E0'
         assert result['gates']['task_transfer'] == 'not_evaluated'
+        assert client.get(f'/jobs/{identifier}/report').content.startswith(b'%PDF-')
         archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{identifier}/artifacts').content))
         assert {'experiment_plan.json', 'selection.json', 'ot_reference.npz',
-                'experiments/seed_0/E0/checkpoint.pt', 'scenes/train/000.npz'} <= set(archive.namelist())
+                'experiments/seed_0/E0/checkpoint.pt', 'scenes/train/000.npz', 'result.pdf'} <= set(archive.namelist())
+
+
+def test_pdf_export_backfills_old_results_and_refreshes_changed_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
+    folder = server.ROOT / ('d' * 32)
+    folder.mkdir(parents=True)
+    (folder / 'state.json').write_text(json.dumps({'id': folder.name, 'action': 'generate', 'status': 'completed'}))
+    source = folder / 'result.json'
+    source.write_text('{"action":"generate","samples":1}')
+    with TestClient(server.app) as client:
+        assert client.get('/jobs/' + 'e' * 32 + '/report').status_code == 404
+        url = f'/jobs/{folder.name}/report'
+        first = client.get(url)
+        assert first.status_code == 200 and first.content.startswith(b'%PDF-')
+        target = folder / 'result.pdf'
+        timestamp = target.stat().st_mtime_ns
+        assert client.get(url).content == first.content
+        assert target.stat().st_mtime_ns == timestamp
+        source.write_text('{"action":"generate","samples":2}')
+        os.utime(source, ns=(timestamp + 1_000_000, timestamp + 1_000_000))
+        assert client.get(url).content != first.content
+        archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{folder.name}/artifacts').content))
+        assert archive.read('result.pdf').startswith(b'%PDF-')
 
 
 def test_discovery_lists_only_completed_existing_preparations_after_restart(prepared, tmp_path, monkeypatch):

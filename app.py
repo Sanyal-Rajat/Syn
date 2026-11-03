@@ -344,7 +344,12 @@ def monitor():
                 st.json(report['evaluations'])
                 st.json(report['profiles'])
                 st.write(report['limitations'])
-        st.download_button('Download report', json.dumps(report, indent=2), 'result.json', 'application/json')
+        pdf_key = f'pdf:{cache}'
+        if st.button('Prepare PDF report'):
+            st.session_state[pdf_key] = api('GET', f'/jobs/{job_id}/report', timeout=60).content
+        if pdf_key in st.session_state:
+            st.download_button('Download PDF report', st.session_state[pdf_key], 'result.pdf', 'application/pdf')
+        st.download_button('Download JSON report', json.dumps(report, indent=2), 'result.json', 'application/json')
         if report['action'] != 'prepare' and st.button('Prepare artifact download'):
             st.session_state[f'export:{cache}'] = api('GET', f'/jobs/{job_id}/artifacts', timeout=120).content
         if f'export:{cache}' in st.session_state:

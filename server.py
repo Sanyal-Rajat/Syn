@@ -203,14 +203,34 @@ def result(job_id: str):
     return FileResponse(path, media_type='application/json', filename='result.json')
 
 
+def pdf_report(directory):
+    source, target = directory / 'result.json', directory / 'result.pdf'
+    if not source.is_file():
+        raise HTTPException(409, 'Result is not available yet')
+    if not target.is_file() or target.stat().st_mtime_ns < source.stat().st_mtime_ns:
+        from lidarpoc.report import write_pdf
+        write_pdf(source, target)
+    return target
+
+
+@app.get('/jobs/{job_id}/report')
+def report(job_id: str):
+    directory = job_dir(job_id)
+    state = json.loads((directory / 'state.json').read_text())
+    if state['status'] != 'completed':
+        raise HTTPException(409, 'Complete the job before exporting its PDF report')
+    return FileResponse(pdf_report(directory), media_type='application/pdf', filename='result.pdf')
+
+
 @app.get('/jobs/{job_id}/artifacts')
 def artifacts(job_id: str):
     path = job_dir(job_id)
     if not (path / 'result.json').is_file():
         raise HTTPException(409, 'Complete the job before exporting artifacts')
+    pdf_report(path)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for filename in ('request.json', 'result.json', 'dependency-lock.json', 'profiles.json', 'training.json',
+        for filename in ('request.json', 'result.json', 'result.pdf', 'dependency-lock.json', 'profiles.json', 'training.json',
                          'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz',
                          'resources.json', 'batch_backoff.json'):
             if (path / filename).is_file():

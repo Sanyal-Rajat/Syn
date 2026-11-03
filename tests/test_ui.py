@@ -180,3 +180,35 @@ def test_chosen_and_custom_manifests_persist_without_silent_replacement(prepared
     next(field for field in app.selectbox if field.label == 'Completed preparation').set_value(choices[0]['manifest']).run()
     assert not app.exception
     assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[0]['manifest']
+
+
+def test_completed_job_exposes_pdf_and_retains_json_download(remote, monkeypatch):
+    original = httpx.request
+    identifier, downloads = 'f' * 32, []
+    completed = {'id': identifier, 'action': 'prepare', 'status': 'completed'}
+
+    def request(method, url, **kwargs):
+        path = url.removeprefix('http://127.0.0.2:9000')
+        if path == '/jobs':
+            result = [completed]
+        elif path == f'/jobs/{identifier}':
+            result = completed
+        elif path == f'/jobs/{identifier}/result':
+            result = {'action': 'prepare', 'manifest': '/remote/prepared/manifest.json', 'inventory': []}
+        elif path == f'/jobs/{identifier}/report':
+            downloads.append(path)
+            return httpx.Response(200, content=b'%PDF-test', headers={'content-type': 'application/pdf'},
+                                  request=httpx.Request(method, url))
+        else:
+            return original(method, url, **kwargs)
+        return httpx.Response(200, json=result, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, 'request', request)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    assert not app.exception and not downloads
+    next(button for button in app.button if button.label == 'Prepare PDF report').click().run()
+    assert not app.exception and len(downloads) == 1
+    buttons = {button.proto.label for button in app.get('download_button')}
+    assert {'Download PDF report', 'Download JSON report'} <= buttons
+    app.run()
+    assert len(downloads) == 1

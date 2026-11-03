@@ -19,6 +19,7 @@ external asset banks or LoRA bases are loaded or downloaded.
 - [Training, calibration and generation](#training-calibration-and-generation)
 - [OT, diffusion and RL experiments](#ot-diffusion-and-rl-experiments)
 - [Files and API](#files-and-api)
+- [PDF results reports](#pdf-results-reports)
 - [Troubleshooting](#troubleshooting)
 - [Libraries and verification](#libraries-and-verification)
 
@@ -374,7 +375,9 @@ files depend on the operation:
 | Generate | `sample_*.npz` and provenance in `result.json` |
 | Experiment | `experiments/`, `scenes/`, selection records and per-arm checkpoints/controllers |
 
-The UI downloads completed job artifacts as a ZIP. Raw dataset archives, prepared
+Successful Prepare, Train, Generate and Experiment jobs also save `result.pdf`
+alongside `result.json`. The UI downloads completed job artifacts as a ZIP,
+including both report formats. Raw dataset archives, prepared
 caches and `worker.log` stay on the server; read logs through the UI or log API.
 Headless jobs write to the `--output` directory instead of an API-generated ID.
 
@@ -392,7 +395,35 @@ All API paths below are relative to `http://127.0.0.2:9000` on the client:
 | GET | `/jobs/{job_id}/logs?offset=0` | Incremental processing logs |
 | POST | `/jobs/{job_id}/cancel` | Stop a running job and its worker process group |
 | GET | `/jobs/{job_id}/result` | Completed result JSON |
+| GET | `/jobs/{job_id}/report` | Completed PDF report; also generates one for older JSON-only results |
 | GET | `/jobs/{job_id}/artifacts` | Completed artifact ZIP |
+
+## PDF results reports
+
+In **Monitor and results**, choose a completed job, click **Prepare PDF report**,
+then **Download PDF report**. **Download JSON report** remains available. PDFs are
+generated on the server and transferred through the existing SSH tunnel; the
+client needs no PDF library. Install the updated `requirements-server.txt` before
+running the updated server; it includes ReportLab.
+
+The PDF summarizes the selected arm/profile, held-out scores and exported 95%
+session confidence intervals, with a comparison chart. Experiment reports include
+OT components, return statistics, evidence gates, SAC/comparator findings,
+allocated compute, batch-size differences and limitations. Prepare reports show
+trace inventories; Train reports include loss history; Generate reports show
+sample counts and geometry results. Full detailed records remain in JSON.
+
+Convert an existing downloaded JSON without retraining or contacting the server:
+
+```bash
+# From this project directory, in a local environment:
+python -m pip install 'reportlab>=4,<5'
+python -m lidarpoc.report /path/to/result.json --output /path/to/result.pdf
+```
+
+Omitting `--output` writes a PDF beside the input JSON. Export preserves the source
+JSON, escapes result text, records its SHA-256 and publishes the PDF atomically.
+An existing completed server job gets a PDF on its first report/artifact request.
 
 ## Troubleshooting
 
@@ -431,7 +462,8 @@ orchestrates the new matrix, `experiment_tasks.py` defines its schedulable work,
 and `eval/` contains the task, temporal and decision modules.
 `logs.py` handles process output, progress and log cursors; `telemetry.py` reads
 NVML independently of the training stack. `server.py` manages remote jobs, and
-`app.py` is a thin client.
+`app.py` is a thin client. `report.py` renders JSON results to PDF independently
+of Torch, the model stack and SSH.
 
 GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 `PINNs/gpu_optimizer.py` and `PINNs/sandbox_optimizer_lib.py`. The tunnel adapts

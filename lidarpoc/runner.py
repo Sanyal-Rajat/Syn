@@ -60,6 +60,14 @@ def by_trace(examples):
 
 
 def run(config, directory):
+    report = _run(config, directory)
+    from .report import write_pdf
+    path = write_pdf(Path(directory) / 'result.json')
+    LOGGER.info('PDF results report: %s', path)
+    return report
+
+
+def _run(config, directory):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     if config.action != 'prepare':
