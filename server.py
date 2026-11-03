@@ -122,8 +122,10 @@ def monitor(job_id, process, directory):
 def start(config: RunConfig):
     if config.action != 'prepare':
         from lidarpoc.data.split_manifest import load_manifest
+        from lidarpoc.gpu import resolve_gpus
         try:
             load_manifest(config.manifest)
+            config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})
         except (ValueError, OSError, KeyError) as error:
             raise HTTPException(422, str(error)) from error
     with LOCK:
@@ -169,6 +171,8 @@ def status(job_id: str):
         state['progress'] = json.loads((path / 'progress.json').read_text())
     if (path / 'training.json').is_file():
         state['training'] = json.loads((path / 'training.json').read_text())
+    if (path / 'resources.json').is_file():
+        state['resources'] = json.loads((path / 'resources.json').read_text())
     if (path / 'worker.log').is_file():
         with (path / 'worker.log').open('rb') as stream:
             stream.seek(max(0, (path / 'worker.log').stat().st_size - 12000))
@@ -207,7 +211,8 @@ def artifacts(job_id: str):
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
         for filename in ('request.json', 'result.json', 'dependency-lock.json', 'profiles.json', 'training.json',
-                         'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz'):
+                         'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz',
+                         'resources.json', 'batch_backoff.json'):
             if (path / filename).is_file():
                 archive.write(path / filename, filename)
         for pattern in ('*.pt', 'sample_*.npz'):

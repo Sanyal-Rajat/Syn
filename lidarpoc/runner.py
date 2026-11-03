@@ -3,12 +3,10 @@ import argparse
 from functools import partial
 import json
 from pathlib import Path
-import subprocess
-import sys
 
 import numpy as np
 
-from .calibration import DEFAULT, NAMES, apply, calibrate
+from .calibration import DEFAULT, NAMES, apply, calibration_task
 from .config import RunConfig
 from .data.download import ensure_dataset
 from .data.scan_to_range import unproject
@@ -32,16 +30,18 @@ def read_examples(manifest, split, window, per_trace):
     return examples
 
 
-def generate(model, count, seed=0, conditioning=None, has_intensity=True):
+def generate(model, count, seed=0, conditioning=None, has_intensity=True, sampler=None):
+    from .sampling import SamplingPool
+
     result = []
     model.eval()
-    for index in range(count):
-        generated = model.sample(1, conditioning, seed + index)
+    sampler = sampler or SamplingPool(model)
+    requests = [{'batch_size': 1, 'conditioning': conditioning, 'seed': seed + index} for index in range(count)]
+    for generated in sampler.sample_many(requests):
         sample = {key: value[0].cpu().numpy() for key, value in generated.items()}
         sample['has_intensity'] = np.asarray([has_intensity] * model.config['window'])
         sample['max_range_m'] = float(model.sensor_meta['max_range_m'])
         result.append(sample)
-        LOGGER.info('Generated sample %d/%d', index + 1, count)
     return result
 
 
@@ -62,6 +62,9 @@ def by_trace(examples):
 def run(config, directory):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    if config.action != 'prepare':
+        from .gpu import resolve_gpus
+        config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})
     write_json(directory / 'request.json', config.model_dump())
     evidence = license_gate()
     write_json(directory / 'dependency-lock.json', runtime_lock())
@@ -95,16 +98,8 @@ def run(config, directory):
                                             'max_range_m': manifest['sensor_meta']['max_range_m']})
         write_json(directory / 'request.json', config.model_dump())
         progress('training random-initialized diffusion model', 0, config.epochs)
-        command = [sys.executable]
-        if config.gpus > 1:
-            if config.gpus > torch.cuda.device_count():
-                raise ValueError('Requested more GPUs than the remote server exposes')
-            command += ['-m', 'torch.distributed.run', '--standalone', f'--nproc_per_node={config.gpus}',
-                        '-m', 'lidarpoc.train']
-        else:
-            command += ['-m', 'lidarpoc.train']
-        command += ['--request', str(directory / 'request.json'), '--output', str(directory)]
-        subprocess.run(command, check=True)
+        from .gpu import launch_training
+        launch_training(config, directory)
         checkpoint_path = directory / 'checkpoint.pt'
     else:
         checkpoint_path = Path(config.checkpoint).expanduser().resolve()
@@ -116,6 +111,9 @@ def run(config, directory):
     torch.set_num_threads(1 if device == 'cpu' else 4)
     model = LidarDMAdapter(checkpoint['config'], checkpoint['sensor_meta']).to(device)
     model.load_state_dict(checkpoint['state_dict'])
+    model.config.update(auto_optimize=config.auto_optimize, batch_size=config.batch_size)
+    from .sampling import SamplingPool
+    sampler = SamplingPool(model, [f'cuda:{index}' for index in range(config.gpus)])
     window = checkpoint['config']['window']
     conditioning = None
     if config.conditioning:
@@ -129,9 +127,9 @@ def run(config, directory):
         model.config['sample_steps'] = config.sample_steps
         if config.controller_file:
             from .ot.generate import controlled_generate
-            generated = controlled_generate(model, config)
+            generated = controlled_generate(model, config, sampler)
         else:
-            generated = generate(model, config.samples_per_trace, config.seed, conditioning)
+            generated = generate(model, config.samples_per_trace, config.seed, conditioning, sampler=sampler)
         if config.profile_file:
             profile = json.loads(Path(config.profile_file).read_text())['profiles'][config.profile_name]
             generated = apply(generated, profile['theta'], config.seed)
@@ -161,19 +159,22 @@ def run(config, directory):
     training = read_examples(manifest, 'train', window, config.samples_per_trace)
     validation = read_examples(manifest, 'validation', window, config.samples_per_trace)
     has_intensity = all(bool(np.asarray(row['has_intensity']).all()) for row in training)
-    calibration_generated = generate(model, len(training), config.seed + 10_000, has_intensity=has_intensity)
-    validation_generated = generate(model, len(validation), config.seed + 20_000, has_intensity=has_intensity)
+    calibration_generated = generate(model, len(training), config.seed + 10_000, has_intensity=has_intensity, sampler=sampler)
+    validation_generated = generate(model, len(validation), config.seed + 20_000, has_intensity=has_intensity, sampler=sampler)
     profiles = {'uncalibrated': {'theta': DEFAULT.tolist(),
                 'validation': compare(describe(validation), describe(validation_generated), manifest['sensor_meta']['max_range_m'])}}
     if config.rl_enabled:
-        for index, method in enumerate(config.methods):
-            progress(f'{method} sensor calibration', index, len(config.methods))
-            result = calibrate(method, training, calibration_generated, validation, validation_generated,
-                               manifest['sensor_meta']['max_range_m'], config.budget, config.seed, device)
-            policy = result.pop('policy', None)
-            if policy:
-                torch.save(policy, directory / f'{method}_policy.pt')
-            profiles[method] = result
+        from .scheduling import map_tasks
+        model.cpu()
+        sampler.close()
+        jobs = [{'method': method, 'real': training, 'generated': calibration_generated,
+                 'validation_real': validation, 'validation_generated': validation_generated,
+                 'max_range': manifest['sensor_meta']['max_range_m'], 'budget': config.budget,
+                 'seed': config.seed, 'gpus': config.gpus, 'output': str(directory)} for method in config.methods]
+        profiles.update(map_tasks(calibration_task, jobs, config.gpus,
+            on_done=lambda done, total: progress('independent sensor calibration methods', done, total)))
+        model.to(device)
+        sampler = SamplingPool(model, [f'cuda:{index}' for index in range(config.gpus)])
     write_json(directory / 'profiles.json', {'parameter_names': list(NAMES), 'profiles': profiles})
     selected_profile = min(profiles, key=lambda name: profiles[name]['validation']['loss'])
     # Final real test arrays are loaded only after training and calibration are frozen.
@@ -184,7 +185,7 @@ def run(config, directory):
     for identity, examples in real.items():
         # Same fixed synthetic seed bank for every test trace and every calibration arm.
         generator_results[identity] = generate(model, len(examples), config.seed + 30_000,
-                                                has_intensity=has_intensity)
+                                                has_intensity=has_intensity, sampler=sampler)
     maximum = manifest['sensor_meta']['max_range_m']
     evaluations = {}
     rng = np.random.default_rng(config.seed)

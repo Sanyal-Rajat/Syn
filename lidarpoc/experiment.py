@@ -1,10 +1,8 @@
 """Additive E0–E5 experiment runner; freeze all choices before decoding real test arrays."""
 from collections import defaultdict
-import os
 from pathlib import Path
-import subprocess
-import sys
 import time
+import json
 
 import numpy as np
 import torch
@@ -13,12 +11,12 @@ from .data.split_manifest import digest, load_manifest
 from .data.synthetic_scene import geometry_digest, scene_splits
 from .eval import downstream
 from .eval.gates import decisions
-from .eval.ot_metrics import evaluate, session_intervals
+from .eval.ot_metrics import session_intervals
 from .eval.domain_metrics import bootstrap
 from .io import write_json
+from .gpu import launch_training, resolve_gpus
 from .logs import progress
 from .models.lidardm_adapter import LidarDMAdapter
-from .ot.controllers import Renderer, controlled_bank, fit_controller
 from .ot.reference import build_reference, load_reference
 from .provenance import license_gate, provenance, validate_checkpoint
 
@@ -78,35 +76,29 @@ def train_arm(config, directory, manifest, arm):
         torch.save({'state_dict': model.state_dict(), 'config': config.model_dump(), 'sensor_meta': manifest['sensor_meta'],
                     'provenance': proof, 'epoch': 0}, directory / 'checkpoint.pt')
     else:
-        command = [sys.executable, '-u', '-m', 'lidarpoc.train']
-        if config.gpus > 1:
-            command = [sys.executable, '-m', 'torch.distributed.run', '--standalone', f'--nproc_per_node={config.gpus}',
-                       '-m', 'lidarpoc.train']
-        subprocess.run(command + ['--request', str(request), '--output', str(directory)], check=True,
-                       env={**os.environ, 'PYTHONUNBUFFERED': '1'})
+        launch_training(config, directory)
     elapsed = time.perf_counter() - started
+    resources = directory / 'resources.json'
     return {'training_seconds': elapsed, 'allocated_training_gpu_hours': elapsed * config.gpus / 3600 if arm != 'E0' else 0.,
-            'epochs': 0 if arm == 'E0' else config.epochs, 'seed': config.seed}
+            'epochs': 0 if arm == 'E0' else config.epochs, 'seed': config.seed,
+            'training_resources': json.loads(resources.read_text()) if resources.is_file() else {}}
 
 
 def run_experiment(config, directory):
     from .runner import read_examples
 
     directory = Path(directory).resolve()
+    config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})
     manifest = load_manifest(config.manifest, verify_files=True)
     license_gate(manifest)
-    if config.gpus and (not torch.cuda.is_available() or config.gpus > torch.cuda.device_count()):
-        raise ValueError('Requested experiment GPUs are unavailable; choose gpus=0 for CPU')
-    device = 'cuda:0' if config.gpus else 'cpu'
     torch.set_num_threads(4 if config.gpus else 1)
     sensor, settings = manifest['sensor_meta'], config.experiment
     if config.checkpoint:
         validate_checkpoint(torch.load(config.checkpoint, map_location='cpu', weights_only=True), config.manifest)
     progress(directory, 'freezing training-only OT reference and canonical scene splits')
     training = read_examples(manifest, 'train', config.window, config.samples_per_trace)
-    development = read_examples(manifest, 'validation', config.window, config.samples_per_trace)
     reference_path = build_reference(training, config.manifest, config.ot, directory / 'ot_reference.npz')
-    reference, reference_metadata = load_reference(reference_path, config.manifest, config.ot)
+    _, reference_metadata = load_reference(reference_path, config.manifest, config.ot)
     scenes = scene_splits(sensor, config.window, settings, directory / 'scenes')
     plan = {'specification': 'sim_to_real_OT_diffusion_RL_updated_report.pdf',
             'specification_sha256': '3cb5b0d8d6cae8d83264a73684a86753b7b1c75cd1ab58523f61591a28ab9ffa',
@@ -117,95 +109,59 @@ def run_experiment(config, directory):
             'primary_metric': 'development_point_segmentation_mean_iou' if settings.downstream else 'development_OT_gap_surrogate',
             'task_probe': 'small point-wise semantic MLP, not a production perception benchmark',
             'test_arrays_used_for_fitting': False, 'mass_objective': 'raw KL-regularized unbalanced OT',
-            'strata_scope': 'range and ring proxies; not matched road type/material/incidence labels'}
+            'strata_scope': 'range and ring proxies; not matched road type/material/incidence labels',
+            'compute_scheduling': 'independent jobs on disjoint GPU groups; DDP within diffusion jobs',
+            'automatic_throughput_tuning': config.auto_optimize}
     write_json(directory / 'experiment_plan.json', plan)
-    seeds, validations, computations, task_models, task_development = {}, {}, {}, {}, {}
-    count = max(1, config.samples_per_trace * len(manifest['splits']['validation']))
-    for seed in settings.seeds:
-        seed_directory = directory / 'experiments' / f'seed_{seed}'
-        records, banks, validation_rows, costs = {}, {}, {}, {}
-        seed_directory.mkdir(parents=True, exist_ok=True)
-        for arm in [value for value in settings.ablations if value != 'E5']:
-            progress(directory, f'seed {seed}: {arm} diffusion ablation')
-            arm_directory = seed_directory / arm
-            current = arm_config(config, arm, reference_path, sensor, seed)
-            costs[arm] = train_arm(current, arm_directory, manifest, arm)
-            checkpoint = arm_directory / 'checkpoint.pt'
-            model = load_model(checkpoint, manifest, device)
-            model.config['sample_steps'] = config.sample_steps
-            renderer = Renderer(model, scenes['validation'])
-            renderer.reference, renderer.ot = reference, config.ot
-            started = time.perf_counter()
-            bank, canonical = controlled_bank(renderer, scenes['validation'], count, seed + 100000)
-            validation_rows[arm] = evaluate(development, bank, canonical, sensor, config.ot, config.geometry_tolerance_m)
-            costs[arm]['development_seconds'] = time.perf_counter() - started
-            records[arm] = {'checkpoint': str(checkpoint), 'profile': None, 'policy': None}
-            save_bank(arm_directory / 'development_samples', bank)
-            if settings.downstream:
-                started = time.perf_counter()
-                training_renderer = Renderer(model, scenes['train'])
-                training_renderer.reference, training_renderer.ot = reference, config.ot
-                banks[arm], _ = controlled_bank(training_renderer, scenes['train'], count, seed + 300000)
-                costs[arm]['synthetic_training_bank_seconds'] = time.perf_counter() - started
-            if arm == 'E4' and 'E5' in settings.ablations:
-                for method in settings.controllers:
-                    if not config.rl_enabled and method in ('sac', 'ppo', 'contextual_bandit'):
-                        continue
-                    progress(directory, f'seed {seed}: frozen E4 + {method} controller')
-                    train_renderer = Renderer(model, scenes['train'])
-                    train_renderer.reference, train_renderer.ot = reference, config.ot
-                    profile, policy = fit_controller(method, train_renderer, scenes['train'], reference, sensor,
-                        config.ot, settings, config.budget, seed, device)
-                    name = f'E5_{method}'
-                    folder = seed_directory / name
-                    folder.mkdir(parents=True, exist_ok=True)
-                    write_json(folder / 'controller.json', profile)
-                    bundle = {'profile': profile, 'policy': cpu_policy(policy), 'checkpoint_sha256': digest(checkpoint),
-                              'manifest_sha256': digest(config.manifest), 'algorithm': method, 'reference_sha256': digest(reference_path),
-                              'root_initialization': 'random', 'ot_config': config.ot.model_dump()}
-                    bundle['reference'] = {key: torch.as_tensor(value) for key, value in reference.items()}
-                    torch.save(bundle, folder / 'controller.pt')
-                    started = time.perf_counter()
-                    bank, canonical = controlled_bank(renderer, scenes['validation'], count, seed + 100000, profile, policy)
-                    validation_rows[name] = evaluate(development, bank, canonical, sensor, config.ot, config.geometry_tolerance_m)
-                    records[name] = {'checkpoint': str(checkpoint), 'profile': profile, 'policy': policy,
-                                     'controller': str(folder / 'controller.pt')}
-                    costs[name] = {**{key: profile[key] for key in ('generation_calls', 'call_budget', 'elapsed_s', 'seconds_budget')},
-                                   'denoiser_evaluations': profile['denoiser_evaluations'],
-                                   'allocated_controller_gpu_hours': profile['elapsed_s'] * min(config.gpus, 1) / 3600,
-                                   'shared_training_arm': 'E4',
-                                   'development_seconds': time.perf_counter() - started,
-                                   'frozen_generator': True}
-                    save_bank(folder / 'development_samples', bank)
-                    if settings.downstream:
-                        started = time.perf_counter()
-                        banks[name], _ = controlled_bank(train_renderer, scenes['train'], count, seed + 300000, profile, policy)
-                        costs[name]['synthetic_training_bank_seconds'] = time.perf_counter() - started
-            model.cpu()
-            del renderer, model
-        for name in records:
-            costs[name]['evaluation_calls_per_phase'] = count
-            costs[name]['evaluation_denoiser_evaluations_per_phase'] = 2 * config.sample_steps * count
-        if settings.downstream:
-            progress(directory, f'seed {seed}: identical-budget point-segmentation probes')
-            available_real = len(downstream.labeled_points(training, sensor)[1])
-            common_synthetic = min(len(downstream.labeled_points(bank, sensor)[1]) for bank in banks.values())
-            fitted, rows = {}, {}
-            for name, bank in banks.items():
-                started = time.perf_counter()
-                fitted[name], rows[name] = {}, {}
+    from . import experiment_tasks as tasks
+    from .scheduling import map_tasks
+
+    seeds = {seed: {} for seed in settings.seeds}
+    validations = {seed: {} for seed in settings.seeds}
+    computations = {seed: {} for seed in settings.seeds}
+    task_models, task_development = {}, {}
+    base = {'root': str(directory), 'config': config.model_dump()}
+    arms = [name for name in settings.ablations if name != 'E5']
+    jobs = [{**base, 'seed': seed, 'name': name} for seed in settings.seeds for name in arms]
+
+    def collect(results):
+        for result in results:
+            seed, name = result['seed'], result['name']
+            seeds[seed][name] = result['record']
+            validations[seed][name] = result['validation']
+            computations[seed][name] = result['cost']
+
+    collect(map_tasks(tasks.development, jobs, config.gpus,
+        on_done=lambda done, total: progress(directory, 'diffusion development jobs', done, total)))
+    if 'E5' in settings.ablations:
+        jobs = [{**base, 'seed': seed, 'name': f'E5_{method}'} for seed in settings.seeds
+                for method in settings.controllers
+                if config.rl_enabled or method not in ('sac', 'ppo', 'contextual_bandit')]
+        collect(map_tasks(tasks.development, jobs, config.gpus,
+            on_done=lambda done, total: progress(directory, 'independent frozen-generator controllers', done, total)))
+    if settings.downstream:
+        jobs = []
+        available_real = len(downstream.labeled_points(training, sensor)[1])
+        for seed, records in seeds.items():
+            common = min(len(downstream.labeled_points(tasks.load_bank(
+                directory / 'experiments' / f'seed_{seed}' / name / 'training_samples'), sensor)[1]) for name in records)
+            task_models[seed], task_development[seed] = {}, {}
+            for name in records:
+                task_models[seed][name], task_development[seed][name] = {}, {}
                 for budget in settings.label_budgets:
-                    real_count, synthetic_count = min(budget, available_real), min(budget, common_synthetic)
-                    probe, probe_report = downstream.fit(training, bank, development, sensor, real_count,
-                                                         synthetic_count, settings.downstream_steps, seed)
-                    fitted[name][str(budget)] = (probe, probe_report['classes'])
-                    rows[name][str(budget)] = probe_report
-                    torch.save({'state_dict': probe.state_dict(), 'report': probe_report},
-                               seed_directory / name / f'probe_{budget}.pt')
-                costs[name]['downstream_cpu_seconds'] = time.perf_counter() - started
-            task_models[seed], task_development[seed] = fitted, rows
-        seeds[seed], validations[seed], computations[seed] = records, validation_rows, costs
-        write_json(directory / 'development.json', {'sensor': validations, 'task': task_development, 'compute': computations})
+                    jobs.append({**base, 'seed': seed, 'name': name, 'budget': budget,
+                                 'real_count': min(budget, available_real), 'synthetic_count': min(budget, common)})
+        results = map_tasks(tasks.probe, jobs, config.gpus,
+            on_done=lambda done, total: progress(directory, 'identical-budget downstream probes', done, total))
+        for result in results:
+            seed, name, budget = result['seed'], result['name'], result['budget']
+            task_models[seed][name][budget] = result['path']
+            task_development[seed][name][budget] = result['report']
+            cost = computations[seed][name]
+            cost['downstream_seconds'] = cost.get('downstream_seconds', 0.) + result['seconds']
+            cost['downstream_cpu_seconds'] = cost.get('downstream_cpu_seconds', 0.) + result['cpu_seconds']
+            cost['allocated_probe_gpu_hours'] = cost.get('allocated_probe_gpu_hours', 0.) + result['gpu_hours']
+    write_json(directory / 'development.json', {'sensor': validations, 'task': task_development, 'compute': computations})
     candidates = sorted(set.intersection(*(set(rows) for rows in validations.values())))
     def selection_score(name):
         if settings.downstream:
@@ -221,38 +177,31 @@ def run_experiment(config, directory):
     write_json(directory / 'selection.json', selection)
     progress(directory, 'selection frozen; decoding final real test sessions')
     # No test window or semantic test label is decoded before the immutable selection above.
-    test = read_examples(manifest, 'test', config.window, config.samples_per_trace)
-    tests, task_tests = {}, []
-    for seed, records in seeds.items():
-        rows, task_rows = {}, {}
-        for name, record in records.items():
-            model = load_model(record['checkpoint'], manifest, device)
-            model.config['sample_steps'] = config.sample_steps
-            renderer = Renderer(model, scenes['test'])
-            renderer.reference, renderer.ot = reference, config.ot
-            started = time.perf_counter()
-            bank, canonical = controlled_bank(renderer, scenes['test'], count, seed + 200000,
-                                               record['profile'], record['policy'])
-            rows[name] = evaluate(test, bank, canonical, sensor, config.ot, config.geometry_tolerance_m)
-            cost = computations[seed][name]
-            cost['test_seconds'] = time.perf_counter() - started
-            training_cost = computations[seed][cost.get('shared_training_arm', name)]['allocated_training_gpu_hours']
-            inference_seconds = sum(cost.get(key, 0.) for key in (
-                'development_seconds', 'test_seconds', 'synthetic_training_bank_seconds'))
-            cost['allocated_total_gpu_hours'] = training_cost + cost.get('allocated_controller_gpu_hours', 0.) + inference_seconds * min(config.gpus, 1) / 3600
-            gain = selection_score('E0') - selection_score(name) if 'E0' in candidates else None
-            cost['development_gain_over_E0'] = gain
-            cost['gpu_hours_per_positive_development_gain'] = cost['allocated_total_gpu_hours'] / gain if gain is not None and gain > 0 else None
-            cost['total_generation_calls'] = cost.get('generation_calls', 0) + count * (3 if settings.downstream else 2)
-            cost['calls_per_positive_development_gain'] = cost['total_generation_calls'] / gain if gain is not None and gain > 0 else None
-            save_bank(directory / 'experiments' / f'seed_{seed}' / name / 'test_samples', bank)
-            if settings.downstream:
-                task_rows[name] = {budget: downstream.metric(probe, test, sensor, classes)
-                                   for budget, (probe, classes) in task_models[seed][name].items()}
-            model.cpu()
-            del renderer, model
-        tests[seed] = rows
-        task_tests.append(task_rows)
+    jobs = [{**base, 'seed': seed, 'name': name, 'record': record,
+             'probes': task_models.get(seed, {}).get(name, {})}
+            for seed, records in seeds.items() for name, record in records.items()]
+    results = map_tasks(tasks.test, jobs, config.gpus,
+        on_done=lambda done, total: progress(directory, 'frozen held-out evaluation jobs', done, total))
+    tests, task_rows = {seed: {} for seed in settings.seeds}, {seed: {} for seed in settings.seeds}
+    for result in results:
+        seed, name = result['seed'], result['name']
+        tests[seed][name] = result['metrics']
+        if settings.downstream:
+            task_rows[seed][name] = result['task']
+        cost = computations[seed][name]
+        cost['test_seconds'] = result['seconds']
+        training_cost = computations[seed][cost.get('shared_training_arm', name)]['allocated_training_gpu_hours']
+        inference_hours = ((cost.get('development_seconds', 0.) + cost.get('synthetic_training_bank_seconds', 0.))
+                           * cost['inference_gpus'] + result['seconds'] * result['gpus']) / 3600
+        cost['allocated_total_gpu_hours'] = (training_cost + cost.get('allocated_controller_gpu_hours', 0.)
+                                             + cost.get('allocated_probe_gpu_hours', 0.) + inference_hours)
+        gain = selection_score('E0') - selection_score(name) if 'E0' in candidates else None
+        cost['development_gain_over_E0'] = gain
+        cost['gpu_hours_per_positive_development_gain'] = cost['allocated_total_gpu_hours'] / gain if gain is not None and gain > 0 else None
+        count = cost['evaluation_calls_per_phase']
+        cost['total_generation_calls'] = cost.get('generation_calls', 0) + count * (3 if settings.downstream else 2)
+        cost['calls_per_positive_development_gain'] = cost['total_generation_calls'] / gain if gain is not None and gain > 0 else None
+    task_tests = [task_rows[seed] for seed in settings.seeds]
     gates = decisions([rows[selected] for rows in tests.values()], task_tests, selected, settings)
     if 'E5_sac' in candidates and rl_comparator:
         baseline = rl_comparator

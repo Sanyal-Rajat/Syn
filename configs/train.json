@@ -1,9 +1,11 @@
 {
   "action": "train",
   "manifest": "/data/pandar128/projected/manifest.json",
-  "gpus": 1,
+  "gpus": -1,
   "epochs": 5,
-  "batch_size": 2,
+  "batch_size": 512,
+  "auto_optimize": true,
+  "workers": -1,
   "window": 2,
   "channels": 32,
   "diffusion_steps": 1000,

@@ -10,14 +10,14 @@ from ..data.split_manifest import digest
 from ..data.synthetic_scene import load_scene
 
 
-def controlled_generate(model, config):
+def controlled_generate(model, config, sampler=None):
     bundle = torch.load(Path(config.controller_file).expanduser(), map_location='cpu', weights_only=True)
     if (bundle.get('root_initialization') != 'random'
             or bundle.get('checkpoint_sha256') != digest(Path(config.checkpoint).expanduser())
             or bundle.get('manifest_sha256') != digest(config.manifest)):
         raise ValueError('Generation controller does not match this own checkpoint and frozen manifest')
     scene = load_scene(config.conditioning, model.sensor_meta, model.config['window'])
-    renderer = Renderer(model, [scene])
+    renderer = Renderer(model, [scene], sampler)
     renderer.reference = {key: np.asarray(value) for key, value in bundle['reference'].items()}
     renderer.ot = OTConfig(**bundle['ot_config'])
     samples, _ = controlled_bank(renderer, [scene], config.samples_per_trace, config.seed, bundle['profile'], bundle['policy'])

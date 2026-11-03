@@ -4,15 +4,16 @@ from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 
 from .config import RunConfig
 from .data.split_manifest import load_manifest, load_window, windows
-from .gpu import auto_configure_training
+from .gpu import auto_configure_training, launch_training, loader_workers, resolve_gpus
 from .io import write_json
 from .logs import get_logger, progress
 from .models.lidardm_adapter import LidarDMAdapter
@@ -46,34 +47,50 @@ def collate(samples):
 
 
 def to_device(batch, device):
-    return {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+    return {key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+            for key, value in batch.items()}
 
 
 def train(config, output):
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})
     distributed = int(os.environ.get('WORLD_SIZE', '1')) > 1
+    if config.gpus > 1 and not distributed:
+        return launch_training(config, output)
     rank = int(os.environ.get('RANK', '0'))
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
     if config.gpus and not torch.cuda.is_available():
         raise ValueError('No CUDA GPU is available; choose gpus=0 for CPU training')
     device = torch.device(f"cuda:{os.environ.get('LOCAL_RANK', '0')}" if config.gpus else 'cpu')
-    torch.set_num_threads(1 if device.type == 'cpu' else 4)
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else (os.cpu_count() or 1)
+    torch.set_num_threads(1 if device.type == 'cpu' else max(1, min(4, cpus // (2 * world_size))))
     if device.type == 'cuda':
         torch.cuda.set_device(device)
+        torch.backends.cudnn.benchmark = True
         if torch.cuda.get_device_capability(device)[0] >= 8:
             torch.backends.cuda.matmul.allow_tf32 = True
     if distributed:
         torch.distributed.init_process_group('nccl' if device.type == 'cuda' else 'gloo')
+    batch_size = config.batch_size
+    phase = 'setup'
     try:
         torch.manual_seed(config.seed)
-        manifest = load_manifest(config.manifest, verify_files=True)
+        manifest = load_manifest(config.manifest, verify_files=rank == 0)
         license_gate(manifest)
         train_data = RangeDataset(manifest, 'train', config.window)
         validation_data = RangeDataset(manifest, 'validation', config.window)
         sampler = DistributedSampler(train_data, shuffle=True, seed=config.seed) if distributed else None
         resources = auto_configure_training('cpu' if config.gpus == 0 else 'auto', workers=max(1, config.gpus))
         batch_size = min(config.batch_size, resources['estimated_batch_capacity'])
-        loader = DataLoader(train_data, batch_size=batch_size, sampler=sampler, shuffle=sampler is None,
-                            collate_fn=collate, num_workers=config.workers, pin_memory=device.type == 'cuda')
-        validation = DataLoader(validation_data, batch_size=config.batch_size, collate_fn=collate)
+        if config.auto_optimize and device.type == 'cpu':
+            batch_size = min(batch_size, 8)
+        workers = loader_workers(config.workers, 2 * world_size) if device.type == 'cuda' else max(0, config.workers)
+        loader_options = {'num_workers': workers, 'pin_memory': device.type == 'cuda'}
+        if workers:
+            loader_options.update(persistent_workers=True, prefetch_factor=2, multiprocessing_context='spawn')
+        # Striding avoids the duplicate padding introduced by DistributedSampler during evaluation.
+        validation_shard = Subset(validation_data, range(rank, len(validation_data), world_size))
         model_type = LidarDMAdapter
         if any((config.ot.conditional_weight, config.ot.mass_weight, config.ot.physics_weight, config.ot.regularization_weight)):
             from .models.ot_adapter import OTLidarDMAdapter
@@ -83,15 +100,65 @@ def train(config, output):
             parent = torch.load(config.warm_start, map_location='cpu', weights_only=True)
             validate_checkpoint(parent, config.manifest)
             model.load_state_dict(parent['state_dict'])
-        if distributed:
-            model = DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
         dtype = torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float16
-        scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and dtype == torch.float16)
         autocast = lambda: torch.autocast('cuda', dtype=dtype) if device.type == 'cuda' else nullcontext()
+        phase = 'batch_tuning'
+        if config.auto_optimize and device.type == 'cuda':
+            from .tuning import search_batch
+
+            free, _ = torch.cuda.mem_get_info(device)
+            optimizer_bytes = sum(p.numel() * p.element_size() * 2 for p in model.parameters())
+            memory_budget = .85 * (free + torch.cuda.memory_allocated(device)) - optimizer_bytes
+
+            def probe(size):
+                elapsed, peak = 0., 0
+                try:
+                    with torch.random.fork_rng(devices=[device.index]):
+                        for repeat in range(2):
+                            model.zero_grad(set_to_none=True)
+                            torch.cuda.reset_peak_memory_stats(device)
+                            batch = to_device(collate([train_data[index * len(train_data) // size]
+                                                       for index in range(size)]), device)
+                            torch.cuda.synchronize(device)
+                            started = time.perf_counter()
+                            with autocast():
+                                loss = model(batch)['loss']
+                            loss.backward()
+                            torch.cuda.synchronize(device)
+                            if repeat:
+                                elapsed = time.perf_counter() - started
+                            peak = max(peak, torch.cuda.max_memory_allocated(device))
+                    return elapsed, peak
+                finally:
+                    model.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+
+            try:
+                batch_size, measurements = search_batch(probe, min(config.batch_size, len(sampler) if sampler else len(train_data)), memory_budget)
+            except torch.cuda.OutOfMemoryError:
+                batch_size, measurements = 0, []
+            if distributed:
+                shared = torch.tensor(batch_size, device=device)
+                torch.distributed.all_reduce(shared, op=torch.distributed.ReduceOp.MIN)
+                batch_size = int(shared)
+            if batch_size < 1:
+                batch_size = 1
+                raise torch.cuda.OutOfMemoryError('No safe training batch fits on every assigned GPU')
+            resources['batch_tuning'] = {'measurements': measurements, 'memory_budget_bytes': memory_budget}
+        loader = DataLoader(train_data, batch_size=batch_size, sampler=sampler, shuffle=sampler is None,
+                            collate_fn=collate, **loader_options)
+        validation = DataLoader(validation_shard, batch_size=batch_size, collate_fn=collate, **loader_options)
+        resources.update(world_size=world_size, batch_size_per_process=batch_size,
+                         effective_batch_size=batch_size * world_size * config.gradient_accumulation,
+                         loader_workers_per_process=workers, validation_windows=len(validation_data))
+        if distributed:
+            model = DistributedDataParallel(model, device_ids=[device.index] if device.type == 'cuda' else None,
+                                            gradient_as_bucket_view=True)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, fused=device.type == 'cuda')
+        scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda' and dtype == torch.float16)
         history, best = [], float('inf')
-        output = Path(output)
-        output.mkdir(parents=True, exist_ok=True)
+        if rank == 0:
+            write_json(output / 'resources.json', resources)
         proof = provenance(config.manifest, config.model_dump())
         if config.ot.reference:
             proof['ot_reference_sha256'] = digest(config.ot.reference)
@@ -100,52 +167,63 @@ def train(config, output):
             proof['stage_initialization'] = 'own_checkpoint'
             proof['parent_checkpoint_sha256'] = digest(config.warm_start)
         if rank == 0:
-            get_logger().info('Training on %s with %d worker(s), %d training windows, batch size %d',
-                              device, int(os.environ.get('WORLD_SIZE', '1')), len(train_data), batch_size)
+            get_logger().info('Training on %d process(es), %d training windows, batch %d per process, effective batch %d',
+                              world_size, len(train_data), batch_size, resources['effective_batch_size'])
+        get_logger().info('Rank %d/%d uses %s; DataLoader workers=%d, validation windows=%d',
+                          rank, world_size, device, workers, len(validation_shard))
+        phase = 'training'
         for epoch in range(config.epochs):
             if sampler is not None:
                 sampler.set_epoch(epoch)
             model.train()
-            losses = []
-            components_history = {}
-            optimizer.zero_grad()
+            component_totals, sample_count = {}, 0
+            optimizer.zero_grad(set_to_none=True)
             for step, batch in enumerate(loader):
-                with autocast():
-                    components = model(to_device(batch, device))
-                    group_start = step // config.gradient_accumulation * config.gradient_accumulation
-                    group_size = min(config.gradient_accumulation, len(loader) - group_start)
-                    loss = components['loss'] / group_size
-                if not torch.isfinite(loss):
-                    raise ValueError('Nonfinite training loss; checkpoint was not promoted')
-                scaler.scale(loss).backward()
-                if (step + 1) % config.gradient_accumulation == 0 or step + 1 == len(loader):
+                update = (step + 1) % config.gradient_accumulation == 0 or step + 1 == len(loader)
+                sync = model.no_sync() if distributed and not update else nullcontext()
+                with sync:
+                    with autocast():
+                        components = model(to_device(batch, device))
+                        group_start = step // config.gradient_accumulation * config.gradient_accumulation
+                        group_size = min(config.gradient_accumulation, len(loader) - group_start)
+                        loss = components['loss'] / group_size
+                    if not torch.isfinite(loss):
+                        raise ValueError('Nonfinite training loss; checkpoint was not promoted')
+                    scaler.scale(loss).backward()
+                if update:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
                     scaler.step(optimizer)
                     scaler.update()
-                    optimizer.zero_grad()
-                losses.append(float(components['loss'].detach()))
+                    optimizer.zero_grad(set_to_none=True)
+                sample_count += len(batch['range'])
                 for key, value in components.items():
-                    components_history.setdefault(key, []).append(float(value.detach()))
+                    component_totals[key] = component_totals.get(key, 0) + value.detach().double() * len(batch['range'])
                 if rank == 0 and ((step + 1) % max(1, len(loader) // 20) == 0 or step + 1 == len(loader)):
-                    progress(output, f'epoch {epoch + 1}/{config.epochs}, loss={losses[-1]:.6f}', step + 1, len(loader))
+                    progress(output, f"epoch {epoch + 1}/{config.epochs}, loss={float(components['loss'].detach()):.6f}",
+                             step + 1, len(loader))
             raw_model = model.module if distributed else model
-            metric = torch.zeros(2, device=device)
-            if rank == 0:
-                raw_model.eval()
-                with torch.no_grad(), torch.random.fork_rng(devices=[device.index] if device.type == 'cuda' else []):
-                    torch.manual_seed(config.seed + 9182)
-                    for batch in validation:
+            metric = torch.zeros(2, device=device, dtype=torch.float64)
+            raw_model.eval()
+            with torch.no_grad(), torch.random.fork_rng(devices=[device.index] if device.type == 'cuda' else []):
+                torch.manual_seed(config.seed + 9182 + rank)
+                for batch in validation:
+                    with autocast():
                         values = raw_model.train_step(to_device(batch, device))
-                        metric[0] += values['loss'] * len(batch['range'])
-                        metric[1] += len(batch['range'])
+                    metric[0] += values['loss'].double() * len(batch['range'])
+                    metric[1] += len(batch['range'])
             if distributed:
-                torch.distributed.broadcast(metric, 0)
+                torch.distributed.all_reduce(metric)
             validation_loss = float(metric[0] / metric[1].clamp_min(1))
+            resources['evaluated_validation_windows'] = int(metric[1])
+            names = list(component_totals)
+            totals = torch.stack([component_totals[key] for key in names] + [metric.new_tensor(sample_count)])
+            if distributed:
+                torch.distributed.all_reduce(totals)
             if rank == 0:
-                record = {'epoch': epoch + 1, 'train_loss': sum(losses) / len(losses), 'validation_loss': validation_loss}
-                record.update({f'train_{key}': sum(values) / len(values) for key, values in components_history.items()
-                               if key != 'loss'})
+                averages = dict(zip(names, (totals[:-1] / totals[-1]).tolist()))
+                record = {'epoch': epoch + 1, 'train_loss': averages.pop('loss'), 'validation_loss': validation_loss}
+                record.update({f'train_{key}': value for key, value in averages.items()})
                 history.append(record)
                 write_json(output / 'training.json', history)
                 get_logger().info('Epoch metrics: %s', json.dumps(record))
@@ -159,6 +237,9 @@ def train(config, output):
                     (output / 'checkpoint.tmp').replace(output / 'checkpoint.pt')
         if distributed:
             torch.distributed.barrier()
+    except torch.cuda.OutOfMemoryError:
+        write_json(Path(output) / f'oom-rank-{rank}.json', {'batch_size': batch_size, 'rank': rank, 'phase': phase})
+        raise
     finally:
         if distributed:
             torch.distributed.destroy_process_group()

@@ -1,7 +1,10 @@
 {
   "action": "experiment",
   "manifest": "/path/on/server/to/prepared/manifest.json",
-  "gpus": 1,
+  "gpus": -1,
+  "batch_size": 512,
+  "auto_optimize": true,
+  "workers": -1,
   "epochs": 5,
   "sample_steps": 50,
   "budget": 30,

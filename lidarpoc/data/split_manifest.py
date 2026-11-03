@@ -6,9 +6,8 @@ from pathlib import Path
 import numpy as np
 
 from .pandar_reader import in_sensor_frame, load_arrays, sensor_transform, unpack_scan
-from .scan_to_range import infer_elevations, project
+from .scan_to_range import infer_elevations
 from ..logs import get_logger
-from .annotations import load_poses, point_labels
 
 
 def digest(path):
@@ -51,54 +50,50 @@ def prepare(config, output, evidence):
                 'splits': {split: [] for split in files}, 'leakage_audit': 'whole-trace IDs, source hashes, exact and quantized projected-frame hashes'}
     if beam_fit is not None:
         manifest['sensor_meta']['beam_fit'] = beam_fit
+    from .prepare_tasks import prepare_trace
+    from ..scheduling import device_groups, map_tasks
+
+    gpus = 0
+    if config.gpus:
+        try:
+            from ..gpu import resolve_gpus
+            gpus = resolve_gpus(config.gpus)
+        except ImportError as error:
+            if config.gpus > 0:
+                raise
+            get_logger().warning('GPU projection unavailable; using independent CPU preparation: %s', error)
+    resolved = config.model_copy(update={'gpus': gpus})
+    tasks = [{'config': resolved.model_dump(), 'path': str(path), 'output': str(output),
+              'split': split, 'transform': transform.tolist(), 'elevations': elevations.tolist()}
+             for split, paths in files.items() for path in paths]
+    groups = None
+    if gpus > 1:
+        import psutil
+        import zipfile
+        largest = 0
+        for task in tasks:
+            with zipfile.ZipFile(task['path']) as archive:
+                largest = max(largest, sum(info.file_size for info in archive.infolist()))
+        slots = max(1, int(psutil.virtual_memory().available * .6 / max(1, 2 * largest)))
+        groups = device_groups(gpus, min(len(tasks), slots))
+    from ..logs import progress
+    results = map_tasks(prepare_trace, tasks, gpus, groups=groups,
+        on_done=lambda done, total: progress(output, 'preparing whole traces', done, total))
     trace_splits, source_splits, fingerprints = {}, {}, {}
-    for split, paths in files.items():
-        for path in paths:
-            trace = path.name.removesuffix('_scan_list.npz')
-            get_logger().info('Preparing %s trace %s', split, trace)
-            source_hash = digest(path)
-            for mapping, key, kind in [(trace_splits, trace, 'trace'), (source_splits, source_hash, 'source hash')]:
-                if key in mapping and mapping[key] != split:
-                    raise ValueError(f'Cross-split leakage ({kind}): {trace}')
-                mapping[key] = split
-            frames = load_arrays(path)
-            poses = load_poses(path, config.odometry_mode,
-                               np.linalg.inv(sensor_transform(config.calibration_file, 'vehicle'))) if config.odometry_mode != 'disabled' else None
-            if poses is not None and len(poses) < min(config.max_frames, len(frames)):
-                raise ValueError(f'{trace}: fewer odometry records than scan frames')
-            entry = {'sequence_id': trace, 'source_file': str(path), 'source_sha256': source_hash,
-                     'source_frames': len(frames), 'schema': str(np.asarray(frames[0]).dtype), 'frames': []}
-            folder = output / split / trace
-            folder.mkdir(parents=True, exist_ok=True)
-            entry['odometry_mode'] = config.odometry_mode if poses is not None else 'unavailable'
-            entry['labels_source'] = 'native Classification field; semantic validity requires confirmation'
-            if poses is not None:
-                entry['odometry_sha256'] = digest(Path(str(path).replace('_scan_list.npz', '_odom_list.npz')))
-            for frame_index, raw in enumerate(frames[:config.max_frames]):
-                xyz, intensity = unpack_scan(raw)
-                projected = project(in_sensor_frame(xyz, transform), intensity, elevations, config.width,
-                                    config.max_range_m, config.beam_tolerance_deg, config.intensity_max, return_indices=True)
-                labels = point_labels(raw)
-                projected['labels'] = np.full(projected['valid'].shape, -1, dtype='int64')
-                if labels is not None:
-                    projected['labels'][projected['valid']] = labels[projected['point_index'][projected['valid']]]
-                if poses is not None:
-                    projected['world_from_sensor'] = poses[frame_index]
-                if not projected['valid'].any():
-                    raise ValueError(f'{trace}:{frame_index}: zero valid rays; check coordinate frame, units and beams')
-                quantized = np.round(projected['range'] / .25).astype('int16')
-                fingerprint = hashlib.sha256(quantized.tobytes() + projected['valid'].tobytes()).hexdigest()
-                if fingerprint in fingerprints and fingerprints[fingerprint] != split:
-                    raise ValueError(f'Cross-split identical/near-identical projected frame: {trace}:{frame_index}')
-                fingerprints[fingerprint] = split
-                cache = folder / f'{frame_index:06d}.npz'
-                np.savez_compressed(cache, **projected, timestamp_ns=np.int64(frame_index * 50_000_000))
-                entry['frames'].append({'path': str(cache), 'sha256': digest(cache), 'index': frame_index})
-            if len(entry['frames']) < config.window:
-                raise ValueError(f'{trace}: fewer frames than the temporal window')
-            manifest['splits'][split].append(entry)
-            get_logger().info('Prepared %s: %d/%d frames', trace, len(entry['frames']), len(frames))
-            del frames
+    for result in results:
+        split, entry = result['split'], result['entry']
+        for mapping, key, kind in [(trace_splits, entry['sequence_id'], 'trace'),
+                                    (source_splits, entry['source_sha256'], 'source hash')]:
+            if key in mapping and mapping[key] != split:
+                raise ValueError(f'Cross-split leakage ({kind}): {entry["sequence_id"]}')
+            mapping[key] = split
+        for fingerprint in result['fingerprints']:
+            if fingerprint in fingerprints and fingerprints[fingerprint] != split:
+                raise ValueError(f'Cross-split identical/near-identical projected frame: {entry["sequence_id"]}')
+            fingerprints[fingerprint] = split
+        manifest['splits'][split].append(entry)
+    manifest['preparation_compute'] = {'gpus': gpus, 'trace_workers': len(groups) if groups else 1,
+                                       'projection': 'torch_cuda' if gpus else 'numpy_cpu'}
     target = output / 'manifest.json'
     target.write_text(json.dumps(manifest, indent=2))
     return str(target)

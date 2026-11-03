@@ -10,29 +10,42 @@ from ..methods import contextual_bandit
 from ..methods.ppo import ActorCriticNetwork
 from ..methods.sac import Actor
 from ..logs import get_logger
+from ..sampling import SamplingPool
 from .environment import score
 
 
 class Renderer:
-    def __init__(self, model, scenes):
+    def __init__(self, model, scenes, sampler=None):
         self.model, self.scenes = model.eval().requires_grad_(False), scenes
+        self.sampler = sampler or SamplingPool(model)
         self.tolerance = model.config['geometry_tolerance_m']
         self.denoiser_evaluations = 0
 
     def __call__(self, controls, seed):
-        scene = self.scenes[controls['scenario']]
-        conditioning = {key: torch.as_tensor(scene[key])[None] for key in ('range', 'valid')}
-        conditioning['complete_scene'] = True
-        sampled = self.model.sample(1, conditioning, seed, guidance=controls['guidance'], force_cfg=True)
-        self.denoiser_evaluations += 2 * self.model.config['sample_steps']
-        result = {key: value[0].cpu().numpy() for key, value in sampled.items()}
-        result['valid'] &= np.random.default_rng(seed).random(result['valid'].shape) >= controls['dropout']
-        for key in ('range', 'intensity'):
-            result[key] = np.where(result['valid'], result[key], 0).astype('float32')
-        for key in ('labels', 'has_intensity', 'world_from_sensor', 'timestamp_ns'):
-            if key in scene:
-                result[key] = np.asarray(scene[key]).copy()
-        return result
+        return self.render_many([(controls, seed)])[0]
+
+    def render_many(self, requests):
+        inputs = []
+        for controls, seed in requests:
+            scene = self.scenes[controls['scenario']]
+            conditioning = {key: torch.as_tensor(scene[key])[None] for key in ('range', 'valid')}
+            conditioning['complete_scene'] = True
+            inputs.append({'batch_size': 1, 'conditioning': conditioning, 'seed': seed,
+                           'guidance': controls['guidance'], 'force_cfg': True})
+        samples = self.sampler.sample_many(inputs)
+        self.denoiser_evaluations += len(samples) * 2 * self.model.config['sample_steps']
+        results = []
+        for (controls, seed), sampled in zip(requests, samples):
+            scene = self.scenes[controls['scenario']]
+            result = {key: value[0].numpy() for key, value in sampled.items()}
+            result['valid'] &= np.random.default_rng(seed).random(result['valid'].shape) >= controls['dropout']
+            for key in ('range', 'intensity'):
+                result[key] = np.where(result['valid'], result[key], 0).astype('float32')
+            for key in ('labels', 'has_intensity', 'world_from_sensor', 'timestamp_ns'):
+                if key in scene:
+                    result[key] = np.asarray(scene[key]).copy()
+            results.append(result)
+        return results
 
 
 def fit_controller(method, renderer, scenes, reference, sensor, ot, settings, budget, seed, device):
@@ -72,7 +85,7 @@ def controlled_bank(renderer, scenes, count, seed, profile=None, policy=None):
         actor = ActorCriticNetwork(9, 9)
         actor.load_state_dict(policy['state'])
         actor.eval()
-    samples, canonicals = [], []
+    samples, canonicals, requests = [], [], []
     inference_context = np.asarray(profile['last_context'], dtype='float32').copy() if profile else None
     for index in range(count):
         scenario = min(len(scenes) - 1, index * len(scenes) // count)
@@ -100,10 +113,14 @@ def controlled_bank(renderer, scenes, count, seed, profile=None, policy=None):
         controls = decode(chosen, len(scenes), 1)
         # Evaluation uses a common, fixed scenario mixture and one sample per call.
         controls.update(scenario=scenario, samples=1)
-        samples.append(renderer(controls, seed + index))
+        if policy:
+            samples.append(renderer(controls, seed + index))
+        else:
+            requests.append((controls, seed + index))
         canonicals.append(scenes[scenario])
         if policy and hasattr(renderer, 'reference'):
-            metrics = score([samples[-1]], renderer.reference, renderer.model.sensor_meta, renderer.ot)
+            metrics = score([samples[-1]], renderer.reference, renderer.model.sensor_meta, renderer.ot,
+                            next(renderer.model.parameters()).device)
             previous = float(inference_context[4])
             inference_context[4:7] = [metrics['gap'], metrics['conditional_sinkhorn'] or 0., metrics['return_mass_l1']]
             inference_context[8] = previous - metrics['gap']
@@ -111,6 +128,7 @@ def controlled_bank(renderer, scenes, count, seed, profile=None, policy=None):
             inference_context[13:13 + count_bins] = [metrics['conditional_by_bin'].get(str(k), 0.) for k in range(count_bins)]
             inference_context[13 + count_bins:] = metrics['mass_error_by_bin']
             inference_context = inference_context.clip(-10, 10)
-        get_logger().info('Controlled generation %d/%d, scenario %d', index + 1, count, scenario)
         unit = chosen
+    if not policy:
+        samples = renderer.render_many(requests)
     return samples, canonicals

@@ -51,6 +51,28 @@ def test_thin_client_keeps_rl_and_submits_remote_config(remote):
     assert 'ppo' in remote[-1]['methods']
 
 
+@pytest.mark.parametrize('operation', ['Train diffusion + calibration', 'OT + diffusion + RL experiment'])
+def test_gpu_server_defaults_to_all_gpus_and_reports_effective_batch(remote, monkeypatch, operation):
+    original = httpx.request
+
+    def request(method, url, **kwargs):
+        if url.endswith('/health'):
+            result = {'status': 'ok', 'hardware': {'gpus': [{'id': i} for i in range(4)]}}
+            return httpx.Response(200, json=result, request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value(operation).run()
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/manifest.json').run()
+    assert next(field for field in app.number_input if field.label == 'Remote GPUs (-1 = all, 0 = CPU)').value == -1
+    assert any('Maximum training batch: 2048 ' in caption.value for caption in app.caption)
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    assert remote[-1]['gpus'] == -1 and remote[-1]['workers'] == -1 and remote[-1]['rl_enabled']
+    assert remote[-1]['auto_optimize']
+
+
 def test_prepare_automatically_downloads_without_a_dataset_path(remote):
     from lidarpoc.config import RunConfig
     app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)

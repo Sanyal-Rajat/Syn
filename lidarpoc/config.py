@@ -23,7 +23,8 @@ class RunConfig(BaseModel):
     max_frames: int = Field(128, ge=2, le=100000)
     window: int = Field(2, ge=1, le=5)
     channels: int = Field(32, ge=8, le=128)
-    batch_size: int = Field(2, ge=1, le=64)
+    batch_size: int = Field(512, ge=1, le=4096)
+    auto_optimize: bool = True
     epochs: int = Field(5, ge=1, le=10000)
     lr: float = Field(1e-4, gt=0, le=.01)
     diffusion_steps: int = Field(1000, ge=10, le=2000)
@@ -34,8 +35,8 @@ class RunConfig(BaseModel):
     temporal_weight: float = Field(.1, ge=0, le=10)
     geometry_tolerance_m: float = Field(.1, gt=0, le=1)
     gradient_accumulation: int = Field(1, ge=1, le=64)
-    workers: int = Field(0, ge=0, le=16)
-    gpus: int = Field(1, ge=0, le=16)
+    workers: int = Field(-1, ge=-1, le=16)
+    gpus: int = Field(-1, ge=-1)
     seed: int = Field(0, ge=0, le=2**31 - 1)
     rl_enabled: bool = True
     methods: list[Literal['ppo', 'random_search', 'bayesian', 'cma_es']] = Field(

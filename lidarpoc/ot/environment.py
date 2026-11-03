@@ -14,11 +14,11 @@ class BudgetExhausted(RuntimeError):
     pass
 
 
-def score(samples, reference, sensor, config):
-    sample = stack_samples(samples)
+def score(samples, reference, sensor, config, device='cpu'):
+    sample = stack_samples(samples, device)
     vector, bins, valid = features(sample, sensor, config)
     selected = select(vector, bins, valid, config.max_points)
-    target = {int(key): torch.as_tensor(reference['features'][reference['bins'] == key])
+    target = {int(key): torch.as_tensor(reference['features'][reference['bins'] == key], device=device)
               for key in np.unique(reference['bins'])}
     try:
         conditional, unsupported, per_bin = conditional_ot(selected, target, config, return_bins=True)
@@ -84,9 +84,10 @@ class SensorAdaptationEnv:
             raise BudgetExhausted('Controller generation/time budget exhausted')
         controls = decode(unit, len(self.scenes), self.settings.controller_max_samples)
         count = min(controls['samples'], self.remaining)
-        samples = [self.renderer(controls, self.seed + self.calls + index) for index in range(count)]
+        requests = [(controls, self.seed + self.calls + index) for index in range(count)]
+        samples = self.renderer.render_many(requests)
         self.calls += count
-        metrics = score(samples, self.reference, self.sensor, self.ot)
+        metrics = score(samples, self.reference, self.sensor, self.ot, next(self.renderer.model.parameters()).device)
         geometry = [scene_metrics(sample, self.scenes[controls['scenario']], self.sensor,
                                    self.renderer.tolerance) for sample in samples]
         physics = sum(not row['geometry_pass'] for row in geometry) / len(geometry)

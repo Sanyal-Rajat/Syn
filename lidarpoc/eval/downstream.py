@@ -33,7 +33,7 @@ def metric(model, samples, sensor, classes):
         if (y >= classes).any():
             raise ValueError('Held-out labels contain classes absent from the frozen training label map')
         with torch.no_grad():
-            prediction = model(torch.from_numpy(x)).argmax(-1).numpy()
+            prediction = model(torch.from_numpy(x).to(next(model.parameters()).device)).argmax(-1).cpu().numpy()
         confusion = np.bincount(classes * y + prediction, minlength=classes**2).reshape(classes, classes)
         rows.append((sample['sequence_id'], confusion))
     grouped = {}
@@ -48,7 +48,11 @@ def metric(model, samples, sensor, classes):
     return output
 
 
-def fit(real, synthetic, development, sensor, real_budget, synthetic_budget, steps, seed):
+def make_model(classes, device='cpu'):
+    return nn.Sequential(nn.Linear(5, 32), nn.ReLU(), nn.Linear(32, classes)).to(device)
+
+
+def fit(real, synthetic, development, sensor, real_budget, synthetic_budget, steps, seed, device='cpu'):
     rx, ry = labeled_points(real, sensor)
     sx, sy = labeled_points(synthetic, sensor)
     classes = int(max(ry.max(), sy.max())) + 1
@@ -59,13 +63,13 @@ def fit(real, synthetic, development, sensor, real_budget, synthetic_budget, ste
     synthetic_index = rng.permutation(len(sy))[:synthetic_budget]
     if len(real_index) != real_budget or len(synthetic_index) != synthetic_budget:
         raise ValueError('Requested identical label budget exceeds available labeled points')
-    x = torch.from_numpy(np.concatenate([rx[real_index], sx[synthetic_index]]))
-    y = torch.from_numpy(np.concatenate([ry[real_index], sy[synthetic_index]]))
+    x = torch.from_numpy(np.concatenate([rx[real_index], sx[synthetic_index]])).to(device)
+    y = torch.from_numpy(np.concatenate([ry[real_index], sy[synthetic_index]])).to(device)
     torch.manual_seed(seed)
-    model = nn.Sequential(nn.Linear(5, 32), nn.ReLU(), nn.Linear(32, classes))
+    model = make_model(classes, device)
     optimizer = torch.optim.Adam(model.parameters(), lr=.003)
     for _ in range(steps):
-        index = torch.randperm(len(y))[:min(256, len(y))]
+        index = torch.randperm(len(y), device=device)[:min(256, len(y))]
         loss = F.cross_entropy(model(x[index]), y[index])
         optimizer.zero_grad()
         loss.backward()

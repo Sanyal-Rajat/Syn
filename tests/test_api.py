@@ -9,6 +9,27 @@ from fastapi.testclient import TestClient
 import server
 
 
+def test_api_resolves_all_gpus_and_rejects_unavailable_counts(prepared, tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    import torch
+
+    monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
+    monkeypatch.setattr(server, 'PROCESSES', {})
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(torch.cuda, 'device_count', lambda: 4)
+    process = MagicMock()
+    process.poll.return_value = 0
+    monkeypatch.setattr(server.subprocess, 'Popen', lambda *args, **kwargs: process)
+    monkeypatch.setattr(server, 'Thread', MagicMock())
+    with TestClient(server.app) as client:
+        response = client.post('/jobs', json={'manifest': prepared})
+        assert response.status_code == 202, response.text
+        path = server.ROOT / response.json()['id'] / 'request.json'
+        assert json.loads(path.read_text())['gpus'] == 4
+        response = client.post('/jobs', json={'manifest': prepared, 'gpus': 5})
+        assert response.status_code == 422 and '4 are visible' in response.text
+
+
 def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
     with TestClient(server.app) as client:

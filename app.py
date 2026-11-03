@@ -164,9 +164,16 @@ with configure:
     else:
         config['manifest'] = manifest_input()
         left, middle, right = st.columns(3)
-        config['gpus'] = left.number_input('Remote GPUs (0 = CPU)', 0, 16, min(1, len(health['hardware']['gpus'])))
+        available_gpus = len(health['hardware']['gpus'])
+        config['gpus'] = left.number_input('Remote GPUs (-1 = all, 0 = CPU)', -1, max(1, available_gpus),
+            -1 if available_gpus else 0,
+            help='All visible GPUs are used by default. Set a positive count to limit the job.')
+        selected_gpus = available_gpus if config['gpus'] == -1 else config['gpus']
+        st.caption(f'{selected_gpus} remote GPU(s) selected. Training uses one process per GPU; independent samples run in parallel.')
         config['sample_steps'] = middle.number_input('Sampling steps', 2, 200, 50)
         config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, 4)
+        config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', value=True,
+            help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
             config['checkpoint'] = st.text_input('Own checkpoint path on the server')
             config['conditioning'] = st.text_input('Optional synthetic scene NPZ on the server',
@@ -178,7 +185,9 @@ with configure:
         else:
             left, middle, right = st.columns(3)
             config['epochs'] = left.number_input('Epochs', 1, 10000, 5)
-            config['batch_size'] = middle.number_input('Batch size per GPU', 1, 64, 2)
+            config['batch_size'] = middle.number_input('Batch size limit per GPU' if config['auto_optimize'] else 'Batch size per GPU',
+                1, 4096, 512 if config['auto_optimize'] else 8,
+                help='Automatic mode measures throughput up to this limit and keeps memory headroom.')
             config['window'] = right.number_input('Frames per temporal window', 1, 5, 2)
             config['rl_enabled'] = st.checkbox('Run PPO calibration and optimizer comparisons' if action == 'train' else 'Enable experimental RL controllers', value=True)
             if action == 'train':
@@ -189,8 +198,9 @@ with configure:
                 config['channels'] = st.selectbox('Base model channels', [8, 16, 32, 64, 128], index=2)
                 config['diffusion_steps'] = st.number_input('Training diffusion steps', 10, 2000, 1000)
                 config['gradient_accumulation'] = st.number_input('Gradient accumulation', 1, 64, 1)
-                config['workers'] = st.number_input('DataLoader workers per GPU', 0, 16, 0)
+                config['workers'] = st.number_input('DataLoader workers per GPU (-1 = auto)', -1, 16, -1)
                 config['lr'] = st.number_input('Learning rate', value=.0001, min_value=.000001, max_value=.01, format='%.6f')
+            st.caption(f"{'Maximum' if config['auto_optimize'] else 'Effective'} training batch: {config['batch_size'] * max(1, selected_gpus) * config['gradient_accumulation']} windows per optimizer step. Actual tuned batches appear in the logs.")
         config['seed'] = st.number_input('Seed', 0, 2147483647, 0)
         if action == 'experiment':
             st.caption('Adds E0–E5 experiments. All choices freeze on development data before final real test arrays are decoded.')
@@ -278,6 +288,9 @@ def monitor():
                               format_func=lambda key: next(f"{j['id'][:12]} · {j['action']} · {j['status']}" for j in jobs if j['id'] == key))
         state = api('GET', f'/jobs/{job_id}').json()
         st.write(f"Status: **{state['status']}**")
+        if state.get('resources'):
+            resource = state['resources']
+            st.caption(f"Training: {resource['world_size']} processes · batch {resource['batch_size_per_process']} per process · effective batch {resource['effective_batch_size']}")
         progress = state.get('progress', {})
         st.progress(progress.get('completed', 0) / max(1, progress.get('total', 1)), text=progress.get('stage', 'starting'))
         if state['status'] == 'running':

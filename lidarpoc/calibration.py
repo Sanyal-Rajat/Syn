@@ -75,3 +75,16 @@ def calibrate(method, real, generated, validation_real, validation_generated, ma
     selected = min(validation, key=lambda row: row['loss'])
     return {'theta': decode(selected['unit']).tolist(), 'validation': selected,
             'history': objective.history, 'policy': policy, 'evaluations': len(objective.history)}
+
+
+def calibration_task(task):
+    import torch
+    from pathlib import Path
+
+    device = 'cuda:0' if task['gpus'] and torch.cuda.is_available() else 'cpu'
+    result = calibrate(task['method'], task['real'], task['generated'], task['validation_real'],
+        task['validation_generated'], task['max_range'], task['budget'], task['seed'], device)
+    policy = result.pop('policy', None)
+    if policy:
+        torch.save(policy, Path(task['output']) / f"{task['method']}_policy.pt")
+    return task['method'], result

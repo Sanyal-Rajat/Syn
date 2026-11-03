@@ -15,6 +15,8 @@ from .masking import encode, masked_mse
 
 
 class LidarDMAdapter(nn.Module):
+    supports_seed_batch = True
+
     def __init__(self, config, sensor_meta):
         super().__init__()
         self.config, self.sensor_meta = config, sensor_meta
@@ -82,9 +84,16 @@ class LidarDMAdapter(nn.Module):
     @torch.no_grad()
     def sample(self, batch_size, conditioning=None, seed=0, steps=None, guidance=1., force_cfg=False):
         device = self.sensor_angles.device
-        generator = torch.Generator(device=device).manual_seed(seed)
         shape = (batch_size, 3 * self.config['window'], *self.sensor_angles.shape[-2:])
-        latent = torch.randn(shape, device=device, generator=generator)
+        if isinstance(seed, (list, tuple)):
+            if len(seed) != batch_size:
+                raise ValueError('Provide one seed per sample in a seeded batch')
+            latent = torch.cat([torch.randn((1, *shape[1:]), device=device,
+                generator=torch.Generator(device=device).manual_seed(value)) for value in seed])
+            generator = None  # DDIM eta=0 is deterministic after the initial noise.
+        else:
+            generator = torch.Generator(device=device).manual_seed(seed)
+            latent = torch.randn(shape, device=device, generator=generator)
         geometry = None if conditioning is None else conditioning['range'].to(device)
         known = None if conditioning is None else conditioning['valid'].to(device).bool()
         if geometry is not None and tuple(geometry.shape) != (batch_size, self.config['window'], *shape[-2:]):

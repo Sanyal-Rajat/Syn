@@ -10,23 +10,23 @@ from .domain_metrics import bootstrap, compare, describe
 from .temporal import noise_correlation, real_persistence
 
 
-def empirical_reference(samples, sensor, config):
-    sample = stack_samples(samples)
+def empirical_reference(samples, sensor, config, device='cpu'):
+    sample = stack_samples(samples, device)
     vector, bins, valid = features(sample, sensor, config)
     selected = select(vector, bins, valid, config.max_points)
     centers, mass = return_mass(sample, sensor, config)
-    return {'features': torch.cat(list(selected.values())).numpy() if selected else np.empty((0, 5), dtype='float32'),
+    return {'features': torch.cat(list(selected.values())).cpu().numpy() if selected else np.empty((0, 5), dtype='float32'),
             'bins': np.concatenate([np.full(len(value), key) for key, value in selected.items()]) if selected else np.empty(0, dtype='int64'),
-            'centers': centers.numpy(), 'mass': mass.numpy()}
+            'centers': centers.cpu().numpy(), 'mass': mass.cpu().numpy()}
 
 
-def evaluate(real, generated, canonical, sensor, config, tolerance):
+def evaluate(real, generated, canonical, sensor, config, tolerance, device='cpu'):
     grouped = {}
     for sample in real:
         grouped.setdefault(sample['sequence_id'], []).append(sample)
     rows = []
     for identity, samples in grouped.items():
-        metrics = score(generated, empirical_reference(samples, sensor, config), sensor, config)
+        metrics = score(generated, empirical_reference(samples, sensor, config, device), sensor, config, device)
         metrics.update(compare(describe(samples), describe(generated), sensor['max_range_m']))
         rows.append({'sequence_id': identity, **metrics})
     geometry = [scene_metrics(sample, original, sensor, tolerance) for sample, original in zip(generated, canonical)]

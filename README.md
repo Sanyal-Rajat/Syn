@@ -25,7 +25,8 @@ python server.py
 # Equivalent: uvicorn server:app --host 127.0.0.1 --port 9000 --workers 1 --no-access-log
 ```
 
-Dataset preparation imports its data libraries independently of Torch/Diffusers.
+CPU dataset preparation remains independent of Torch/Diffusers. Automatic GPU
+preparation imports Torch lazily and falls back to CPU if it is unavailable.
 Training and generation load the model stack when needed. This application uses
 standard AdamW and its own PPO; PEFT, Transformers and bitsandbytes are not required
 server dependencies. If a shared environment raises `HybridCache` import errors or
@@ -149,10 +150,43 @@ before the helper can share it. OpenSSH describes this behavior under
    after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
    fingerprint is a heuristic, not a comprehensive scene-identity proof.
-6. Train. `gpus=0` selects CPU; `gpus>1` launches actual `torchrun`/DDP, one process
-   per GPU. AMP, accumulation, validation checkpoint selection and the adapted
-   PINNs VRAM heuristic are included. Batch size remains a hardware-dependent
-   setting; the heuristic is not an OOM guarantee.
+6. Train. `gpus=-1` (the default) selects every visible GPU on the server;
+   `gpus=0` selects CPU and a positive count limits the job. More than one GPU
+   launches `torchrun`/DDP, one process per GPU for a standalone training job.
+   Experiment jobs are queued on disjoint GPU groups; a diffusion job uses DDP
+   within its group. `CUDA_VISIBLE_DEVICES` can restrict the GPUs exposed to the API.
+   Validation is also sharded across workers without duplicating validation windows.
+   AMP, fused CUDA AdamW, TF32 on supported GPUs, pinned transfers, prefetching and persistent data
+   workers reduce stalls. `workers=-1` chooses workers from the CPU affinity and GPU
+   count; `workers=0` keeps loading in the training process. CPU automatic mode uses
+   no loader subprocesses. Accumulation synchronizes gradients on optimizer updates.
+   Automatic optimization is enabled by default. Training measures candidate batches
+   up to the configured limit (512 by default), selecting useful throughput with
+   15% memory headroom and room for AdamW state. DDP ranks agree on a batch that fits
+   every assigned GPU. Probing preserves RNG state and does not update model weights.
+   A runtime CUDA OOM restarts only the failed training job with a smaller limit;
+   dependency errors and model-allocation failures are not retried. Effective batch
+   is selected batch × processes × accumulation. Disable **Automatically optimize
+   GPU throughput** to choose a fixed batch. Logs identify each rank,
+   device, effective batch and data workers; checkpoints record the resolved resources.
+
+Independent generated samples also run concurrently with CUDA AMP on one model replica per
+selected GPU, preserving sample order and individual seeds. The replicas are reused
+across calibration and evaluation banks. A shared queue lets faster GPUs take more
+work. Compatible requests are batched with independent seeds; observed throughput
+and free memory guide batch growth. An OOM halves the batch and retries those same
+seeds. Small banks use only as many GPUs as there are samples. Changing batch size
+or AMP can change floating-point rounding.
+
+Preparation distributes traces across GPU workers and frames across each worker's
+GPUs. Archive sizes and available RAM limit simultaneous trace decoding. Stable
+nearest-return selection, point labels and cross-split audits are preserved. OT
+scoring and neural probes use their assigned GPU. Independent RL controllers and
+calibration methods run concurrently; each policy retains its own feedback order.
+Downloads, decompression, file I/O, beam fitting and NumPy/SciPy statistics remain CPU
+work. Dependency barriers and insufficient independent work can also leave GPUs
+idle. Automatic tuning targets useful throughput; it cannot guarantee constant
+100% utilization or protect against arbitrary external changes in free GPU memory.
 
 The batch contract is `range/valid/intensity [B,T,H,W]`, optional-intensity flags,
 int64 `timestamp_ns`, sequence IDs and sensor metadata. The published scan export
@@ -217,9 +251,11 @@ For a headless run, edit the server manifest path and resource limits in
 python -m lidarpoc.runner --request configs/experiment.json --output runs/ot-experiment
 ```
 
-The example includes seven controllers and three seeds; it runs several diffusion
-training jobs sequentially. `gpus > 1` uses the existing distributed trainer for
-each diffusion arm. Controllers and generation use one GPU. Generation-call counts,
+The example includes seven controllers and three seeds. Development arms,
+controller fits, label-budget probes and final evaluations run concurrently on
+disjoint GPU groups. Within each phase, available workers take the next ready job.
+All development jobs finish and one global selection freezes before any real test
+arrays are decoded. Frozen policies preserve their feedback order. Generation-call counts,
 denoiser evaluations and measured elapsed allocation are exported; the controller
 time cap is checked between actions. A final action can overrun it, and such a run
 cannot pass the equal-budget RL gate.
