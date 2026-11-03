@@ -10,7 +10,32 @@ trained from random initialization. It does not reproduce the upstream latent
 SDF/VAE world-generation pipeline. No KITTI-360/Waymo weights, pretrained VAEs,
 external asset banks or LoRA bases are loaded or downloaded.
 
-## Run
+## Contents
+
+- [Quickstart](#quickstart)
+- [Logs, GPU graphs and existing SSH connections](#logs-gpu-graphs-and-existing-ssh-connections)
+- [Prepare the dataset](#prepare-the-dataset)
+- [Automatic GPU scheduling](#automatic-gpu-scheduling)
+- [Training, calibration and generation](#training-calibration-and-generation)
+- [OT, diffusion and RL experiments](#ot-diffusion-and-rl-experiments)
+- [Files and API](#files-and-api)
+- [Troubleshooting](#troubleshooting)
+- [Libraries and verification](#libraries-and-verification)
+
+## Quickstart
+
+Use a local copy of this project on both machines. Run each command from that
+machine's project directory. Python 3.11+ is required; the SSH helper uses Bash and
+OpenSSH on the client. The server needs sufficient RAM and disk for the dataset,
+and a compatible NVIDIA driver and CUDA-enabled PyTorch for GPU execution.
+
+| Component | Machine | Address |
+| --- | --- | --- |
+| Streamlit UI / browser | Client | `http://127.0.0.1:9000` |
+| SSH forward to the API | Client | `http://127.0.0.2:9000` |
+| FastAPI compute service | Server | `http://127.0.0.1:9000` |
+
+### Server
 
 Copy this directory to the remote server. Install a PyTorch build appropriate for
 its GPUs, then install `requirements-server.txt` in a separate Python 3.11+ server
@@ -33,9 +58,13 @@ server dependencies. If a shared environment raises `HybridCache` import errors 
 a missing `libbitsandbytes_cuda130.so`, use the separate environment above rather
 than inheriting those incompatible optional packages.
 
-On the client, only the UI dependencies are required:
+### Client
+
+Create a separate client environment; no GPU or model packages are needed there:
 
 ```bash
+python3 -m venv .venv-client
+source .venv-client/bin/activate
 python -m pip install -r requirements-client.txt
 ssh -i /path/to/your-key.pem YOUR_USER@YOUR_SERVER
 # Verify the host key once, then exit that login session.
@@ -48,6 +77,15 @@ client `127.0.0.1:9000`, the API tunnel binds client `127.0.0.2:9000`, and the r
 API binds server `127.0.0.1:9000`. Separate client loopback addresses allow the UI
 and tunnel to share the same port. The Streamlit defaults are also saved in
 `.streamlit/config.toml`. Run these commands from the project directory.
+
+Check the API through the tunnel from another client terminal:
+
+```bash
+curl --noproxy '*' http://127.0.0.2:9000/health
+```
+
+A successful response contains `"status":"ok"`. The API's interactive reference is
+available through the tunnel at `http://127.0.0.2:9000/docs`.
 
 The same tunnel can be opened directly with your working SSH key, instead of the helper:
 
@@ -62,7 +100,10 @@ work. The SSH transport retains its existing port (22 by default); this does not
 change the server's SSH daemon. The tunnel forwards between loopback addresses. Closing
 the browser or tunnel does not stop remote jobs. Cancellation stops the job's
 process group, including its training workers. API shutdown stops active jobs.
-Use one Uvicorn worker. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact storage.
+Use one Uvicorn worker. The API accepts one top-level compute job at a time;
+independent tasks inside that job can use multiple GPUs concurrently. Starting a
+second job returns HTTP 409. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact
+storage when set before starting the server.
 
 ## Logs, GPU graphs and existing SSH connections
 
@@ -108,7 +149,7 @@ A plain `ssh -i` login without a control socket needs a new multiplexed login
 before the helper can share it. OpenSSH describes this behavior under
 [ControlMaster](https://man.openbsd.org/ssh_config.5#ControlMaster).
 
-## Data and experiments
+## Prepare the dataset
 
 1. Choose **Prepare Pandar128** and click **Start remote job**. With the dataset
    directory left blank, the server automatically downloads the selected
@@ -126,8 +167,10 @@ before the helper can share it. OpenSSH describes this behavior under
 2. Inspect NPZ schemas from the UI. Published structured scalar XYZ/intensity,
    legacy vector-XYZ/i, and the publisher writer's object-tuple variant are handled.
    Variable-length object NPZ files use NumPy pickle loading; use the publisher's
-   files. Preparation holds one source trace in RAM, then writes numeric per-frame
-   caches. Source traces may be large even when a small frame limit is selected.
+   files. Each preparation worker decodes one source trace in RAM and writes
+   numeric per-frame caches. Available RAM limits concurrent trace workers. Source
+   traces may be large even when a small frame limit is selected; `max_frames`
+   limits prepared frames per trace, not the archive download size.
 3. Confirm the input coordinate frame. `vehicle` applies the inverse of the
    captured Pandar128 mounting transform; `sensor` uses the points directly.
    Coordinates are metres, sensor axes are right handed, and azimuth is atan2(y,x).
@@ -150,25 +193,44 @@ before the helper can share it. OpenSSH describes this behavior under
    after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
    fingerprint is a heuristic, not a comprehensive scene-identity proof.
-6. Train. `gpus=-1` (the default) selects every visible GPU on the server;
-   `gpus=0` selects CPU and a positive count limits the job. More than one GPU
-   launches `torchrun`/DDP, one process per GPU for a standalone training job.
-   Experiment jobs are queued on disjoint GPU groups; a diffusion job uses DDP
-   within its group. `CUDA_VISIBLE_DEVICES` can restrict the GPUs exposed to the API.
-   Validation is also sharded across workers without duplicating validation windows.
-   AMP, fused CUDA AdamW, TF32 on supported GPUs, pinned transfers, prefetching and persistent data
-   workers reduce stalls. `workers=-1` chooses workers from the CPU affinity and GPU
-   count; `workers=0` keeps loading in the training process. CPU automatic mode uses
-   no loader subprocesses. Accumulation synchronizes gradients on optimizer updates.
-   Automatic optimization is enabled by default. Training measures candidate batches
-   up to the configured limit (512 by default), selecting useful throughput with
-   15% memory headroom and room for AdamW state. DDP ranks agree on a batch that fits
-   every assigned GPU. Probing preserves RNG state and does not update model weights.
-   A runtime CUDA OOM restarts only the failed training job with a smaller limit;
-   dependency errors and model-allocation failures are not retried. Effective batch
-   is selected batch × processes × accumulation. Disable **Automatically optimize
-   GPU throughput** to choose a fixed batch. Logs identify each rank,
-   device, effective batch and data workers; checkpoints record the resolved resources.
+6. Choose **Train diffusion + calibration** for the original diffusion/PPO workflow,
+   **Generate** for an existing application checkpoint, or **OT + diffusion + RL
+   experiment** for the ablation and controller matrix. Data, checkpoint, scene
+   and output paths refer to the server filesystem. SSH key and control-socket
+   paths refer to the client filesystem.
+
+## Automatic GPU scheduling
+
+Automatic scheduling and throughput tuning are enabled by default. These settings
+apply to UI submissions and JSON requests:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `gpus` | `-1` | All GPUs visible to the server; `0` selects CPU, a positive value limits the count. |
+| `auto_optimize` | `true` | Tune training and sampling batches for measured throughput and available VRAM. |
+| `batch_size` | `512` | Per-GPU batch ceiling while tuning; fixed requested batch when tuning is disabled. |
+| `workers` | `-1` | Choose training data-loader workers automatically; `0` loads inline. |
+| `gradient_accumulation` | `1` | Number of microbatches per optimizer update. |
+| `rl_enabled` | `true` | Keep calibration methods, including PPO, enabled for the original Train workflow. |
+
+`gpus=-1` selects every visible GPU on the server. More than one GPU
+launches `torchrun`/DDP, one process per GPU for a standalone training job.
+Experiment jobs are queued on disjoint GPU groups; a diffusion job uses DDP
+within its group. `CUDA_VISIBLE_DEVICES` can restrict the GPUs exposed to the API.
+Validation is also sharded across workers without duplicating validation windows.
+AMP, fused CUDA AdamW, TF32 on supported GPUs, pinned transfers, prefetching and persistent data
+workers reduce stalls. `workers=-1` chooses workers from the CPU affinity and GPU
+count; `workers=0` keeps loading in the training process. CPU automatic mode uses
+no loader subprocesses. Accumulation synchronizes gradients on optimizer updates.
+Automatic optimization is enabled by default. Training measures candidate batches
+up to the configured limit (512 by default), selecting useful throughput with
+15% memory headroom and room for AdamW state. DDP ranks agree on a batch that fits
+every assigned GPU. Probing preserves RNG state and does not update model weights.
+A runtime CUDA OOM restarts only the failed training job with a smaller limit;
+dependency errors and model-allocation failures are not retried. Effective batch
+is selected batch × processes × accumulation. Disable **Automatically optimize
+GPU throughput** to choose a fixed batch. Logs identify each rank,
+device, effective batch and data workers; checkpoints record the resolved resources.
 
 Independent generated samples also run concurrently with CUDA AMP on one model replica per
 selected GPU, preserving sample order and individual seeds. The replicas are reused
@@ -187,6 +249,8 @@ Downloads, decompression, file I/O, beam fitting and NumPy/SciPy statistics rema
 work. Dependency barriers and insufficient independent work can also leave GPUs
 idle. Automatic tuning targets useful throughput; it cannot guarantee constant
 100% utilization or protect against arbitrary external changes in free GPU memory.
+
+## Training, calibration and generation
 
 The batch contract is `range/valid/intensity [B,T,H,W]`, optional-intensity flags,
 int64 `timestamp_ns`, sequence IDs and sensor metadata. The published scan export
@@ -279,16 +343,92 @@ PPO calibration profiles remain supported. See [implementation details and artif
 formats](docs/ot_report_implementation.md) for the ablation matrix, fixed units,
 optional warm starts, provenance, budgets and remaining limits.
 
+## Files and API
+
+Prepared data and run outputs stay on the server. The default layout is:
+
+```text
+Syn/
+├── app.py                    # Streamlit client
+├── server.py                 # Remote FastAPI service
+├── ssh_tunnel.sh             # Client-side forwarding helper
+├── configs/                  # Example prepare, train and experiment requests
+├── lidarpoc/                 # Independent processing and method modules
+├── LICENSES/                 # Captured dataset/source notices and revision evidence
+├── datasets/pandar128/       # Downloaded and extracted source data
+│   ├── .downloads/           # Reusable compressed archives
+│   ├── train/
+│   ├── validation/
+│   └── test/
+└── runs/<job_id>/            # One directory per API job
+```
+
+Each API job has `request.json`, `state.json` and `worker.log`; running jobs expose
+`progress.json` when available. A successful job writes `result.json`. Additional
+files depend on the operation:
+
+| Operation | Main outputs relative to the job directory |
+| --- | --- |
+| Prepare | `prepared/manifest.json` and per-frame numeric caches |
+| Train | `checkpoint.pt`, `training.json`, `profiles.json`, `sample_000.npz`, resource records and any fitted PPO policy |
+| Generate | `sample_*.npz` and provenance in `result.json` |
+| Experiment | `experiments/`, `scenes/`, selection records and per-arm checkpoints/controllers |
+
+The UI downloads completed job artifacts as a ZIP. Raw dataset archives, prepared
+caches and `worker.log` stay on the server; read logs through the UI or log API.
+Headless jobs write to the `--output` directory instead of an API-generated ID.
+
+All API paths below are relative to `http://127.0.0.2:9000` on the client:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/health` | API status, server hardware and default dataset directory |
+| GET | `/metrics/gpu` | Current server GPU telemetry |
+| GET | `/dataset/prepared` | Discover completed prepared manifests |
+| POST | `/dataset/inspect` | Inspect NPZ schemas; body: `{"root":"/server/path"}` |
+| POST | `/jobs` | Submit a `RunConfig` request; returns the job ID |
+| GET | `/jobs` | List recent jobs |
+| GET | `/jobs/{job_id}` | Status, progress, training metrics and recent log text |
+| GET | `/jobs/{job_id}/logs?offset=0` | Incremental processing logs |
+| POST | `/jobs/{job_id}/cancel` | Stop a running job and its worker process group |
+| GET | `/jobs/{job_id}/result` | Completed result JSON |
+| GET | `/jobs/{job_id}/artifacts` | Completed artifact ZIP |
+
+## Troubleshooting
+
+| Symptom | Check / resolution |
+| --- | --- |
+| `Permission denied (publickey)` | Use the same user, host and `-i /absolute/path/to/key.pem` that work in your normal SSH command. Pass that key to the helper with `-k`, or provide the live control socket with `-S`. |
+| Identity file is inaccessible | Verify the path and ownership on the client. On a Unix client, the key must be readable by your account and private, for example `chmod 600 /path/to/your-key.pem`. |
+| `mux_client_forward: forwarding request failed` | Check `bash ssh_tunnel.sh status` and the health URL first; an existing forward may already work. Use `ss -ltnp 'sport = :9000'` to identify a conflicting client listener. The UI must bind `127.0.0.1`; the API forward must bind `127.0.0.2`. Remove only the conflicting forward before retrying. |
+| Explicit SSH control socket is unavailable | The `-S` path must belong to a running master. Start the reusable connection shown above, or omit `-S` to let the helper establish a managed connection. |
+| HTTP 422: missing manifest | Complete Prepare, then select its manifest from **Completed preparation**. JSON requests need the full server path to `prepared/manifest.json`. |
+| Beam inference fails its residual/spacing check | Confirm `vehicle` versus `sensor` coordinates. Supply 128 sorted measured beam elevations in degrees if inference still fails. Mounting/FOV configuration is not a beam calibration table. |
+| GPU utilization is zero during preparation | Downloading, decompression, trace decoding, beam estimation and file writes use CPU/I/O. GPU projection runs between those stages; check the processing log for the current stage. |
+| Training uses only one GPU | Keep **Remote GPUs (-1 = all, 0 = CPU)** at `-1` and automatic optimization enabled; check server-side `torch.cuda.device_count()`, `CUDA_VISIBLE_DEVICES` and rank/resource logs. A small sample bank or one ready task may not occupy every device. |
+| `HybridCache`, `resolve_revision`, bitsandbytes CUDA binary or FlashAttention undefined-symbol import errors | Use the isolated server environment above with a GPU-compatible PyTorch build and `requirements-server.txt`. This project does not require PEFT, Transformers, bitsandbytes or FlashAttention; incompatible optional packages in a shared environment can break imports. |
+| Hugging Face unauthenticated-request warning | Public downloads can continue. Set `HF_TOKEN` in the server environment before launch if you want authenticated Hub requests. |
+| HTTP 409 on submission | One API compute job is already running. Wait for completion or cancel it in the UI. |
+
+The GPU graphs report host-wide physical usage. They can include unrelated
+processes, and unavailable telemetry fields are distinct from zero utilization.
+Inspect `worker.log` and `resources.json` to confirm this job's assigned devices.
+
 ## Libraries and verification
 
 `lidarpoc/data/download.py` handles pinned downloads, selective extraction and
 reuse. The other `data/` modules handle NPZ, transforms, projection and splits. `models/` holds the
 LidarDM adapter and masking. `methods/` keeps each calibration method independent.
-`train.py` handles optimization/DDP; `calibration.py` handles PPO's environment;
+`train.py` handles optimization/DDP; `tuning.py` profiles batch throughput;
+`scheduling.py` assigns independent tasks to GPU groups; `sampling.py` reuses
+per-GPU replicas and batches generation requests. `data/prepare_tasks.py` and
+`data/gpu_projection.py` distribute trace preparation and projection.
+`calibration.py` handles PPO's environment;
 `eval/domain_metrics.py` holds metrics. `runner.py` orchestrates these libraries.
 `ot/` keeps transport, references, constraints and controller integration separate;
 `models/ot_adapter.py` adds losses without changing the UNet capacity. `experiment.py`
-orchestrates the new matrix, and `eval/` contains the task, temporal and decision modules.
+orchestrates the new matrix, `experiment_tasks.py` defines its schedulable work,
+and `eval/` contains the task, temporal and decision modules.
 `logs.py` handles process output, progress and log cursors; `telemetry.py` reads
 NVML independently of the training stack. `server.py` manages remote jobs, and
 `app.py` is a thin client.
@@ -299,11 +439,15 @@ GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 Source/data notices and revision evidence are in `LICENSES/`. Publisher MIT evidence
 is preserved; dependency and collection-rights review remains pending, as in the report.
 
-Install `pytest`, `httpx` and `requirements-client.txt` alongside the server dependencies:
+Run verification in a local test environment with the server dependencies:
 
 ```bash
+python -m pip install -r requirements-client.txt pytest
 python -m pytest -q
 ```
+
+The default suite uses synthetic data and supports a CPU-only PyTorch install;
+it does not download the full Pandar128 dataset.
 
 Tests use small synthetic fixtures in the publisher's scan schema. They exercise
 projection/masks, split and checkpoint gates, all calibration methods, real random
