@@ -42,23 +42,63 @@ def recover_checkpoints(runs, manifest_sha256):
     return rows
 
 
-def prepare_generation_inputs(runs, manifest_path, checkpoint='', auto_conditioning=True):
-    manifest = load_manifest(manifest_path)
-    fingerprint = digest(manifest_path)
-    rows = []
+def successful_training_runs(runs):
     for state_path in sorted(Path(runs).glob('*/state.json'), key=lambda path: path.stat().st_mtime, reverse=True):
         try:
             state = json.loads(state_path.read_text())
             if state['action'] != 'train' or state['status'] != 'completed':
                 continue
-            window = training_window(state_path.parent, fingerprint)
-            if window is None:
-                continue
+            request = json.loads(state_path.with_name('request.json').read_text())
             result = json.loads(state_path.with_name('result.json').read_text())
-            if result['action'] == 'train':
-                rows.append({'job_id': state['id'], 'checkpoint': resolve_checkpoint(result['checkpoint']), 'window': window})
+            manifest = Path(request['manifest']).expanduser().resolve()
+            load_manifest(manifest)
+            window = request['window']
+            checkpoint = resolve_checkpoint(result['checkpoint'])
+            if (result['action'] == 'train' and type(window) is int and 1 <= window <= 5
+                    and Path(checkpoint).stat().st_size):
+                yield {'job_id': state['id'], 'manifest': str(manifest), 'checkpoint': checkpoint,
+                       'window': window, 'request': request, 'result': result, 'directory': state_path.parent}
         except (OSError, ValueError, KeyError, TypeError):
             continue
+
+
+def generation_defaults(run):
+    from .config import RunConfig
+
+    names = ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'auto_conditioning',
+             'seed', 'batch_size', 'diffusion_steps', 'window')
+    values = RunConfig(action='generate', manifest=run['manifest'], checkpoint=run['checkpoint'],
+                       **{name: run['request'][name] for name in names if name in run['request']}).model_dump()
+    defaults = {name: values[name] for name in names}
+    defaults.update(manifest=run['manifest'], checkpoint=run['checkpoint'], conditioning='',
+                    profile_file='', profile_name='uncalibrated', controller_file='')
+    controller = run['result'].get('generation_controller')
+    if controller:
+        path = Path(controller).expanduser().resolve()
+        if path.is_file() and path.is_relative_to(run['directory'].resolve()):
+            defaults['controller_file'] = str(path)
+    path = run['directory'] / 'profiles.json'
+    try:
+        profiles = json.loads(path.read_text())['profiles']
+        selected = run['result'].get('selected_profile_on_validation', 'uncalibrated')
+        if selected in profiles:
+            defaults.update(profile_file=str(path.resolve()), profile_name=selected)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return defaults
+
+
+def prepare_generation_inputs(runs, manifest_path='', checkpoint='', auto_conditioning=True):
+    completed = list(successful_training_runs(runs))
+    if not manifest_path:
+        if not completed:
+            return {'manifest': '', 'checkpoint': '', 'conditioning': '', 'checkpoints': [], 'defaults': {},
+                    'training_job_id': None, 'diagnostic': f'No successful training run was found under {Path(runs).resolve()}.'}
+        manifest_path = completed[0]['manifest']
+    manifest = load_manifest(manifest_path)
+    fingerprint = digest(manifest_path)
+    rows = [{'job_id': run['job_id'], 'checkpoint': run['checkpoint'], 'window': run['window']}
+            for run in completed if digest(run['manifest']) == fingerprint]
     recovered = not rows
     if recovered:
         rows = recover_checkpoints(runs, fingerprint)
@@ -82,4 +122,10 @@ def prepare_generation_inputs(runs, manifest_path, checkpoint='', auto_condition
                       'Select the manifest used for training, or enter the checkpoint file path manually.')
     elif recovered and rows and not checkpoint:
         diagnostic = 'Using a saved checkpoint whose job has no completed training report; model provenance is checked before generation.'
-    return {'checkpoint': selected, 'conditioning': scene, 'checkpoints': rows, 'diagnostic': diagnostic}
+    source = next((run for run in completed if run['checkpoint'] == selected), None)
+    defaults = generation_defaults(source) if source is not None else {}
+    if defaults:
+        defaults['conditioning'] = scene
+    return {'manifest': str(Path(manifest_path).resolve()), 'checkpoint': selected, 'conditioning': scene,
+            'checkpoints': rows, 'diagnostic': diagnostic, 'defaults': defaults,
+            'training_job_id': source['job_id'] if source else None}

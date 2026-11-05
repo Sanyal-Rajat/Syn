@@ -77,7 +77,7 @@ def json_setting(label, default):
         st.stop()
 
 
-def manifest_input():
+def manifest_input(default='', generation=False):
     try:
         prepared = api('GET', '/dataset/prepared').json()
     except httpx.HTTPError:
@@ -85,8 +85,12 @@ def manifest_input():
         st.caption('Prepared dataset list unavailable. Enter a manifest path below, or update the remote API.')
     paths = [row['manifest'] for row in prepared]
     manual = 'Enter a server path manually'
-    saved_key, field_key, choice_key = (f'{name}:{endpoint}' for name in ('manifest_saved', 'manifest_field', 'manifest_choice'))
+    prefix = 'generate_' if generation else ''
+    saved_key, field_key, choice_key = (f'{prefix}{name}:{endpoint}' for name in ('manifest_saved', 'manifest_field', 'manifest_choice'))
     saved = st.session_state.setdefault(saved_key, {'path': '', 'manual': False})
+    if default and not saved['manual']:
+        saved['path'] = default
+        st.session_state[field_key] = default
     if paths and not saved['path'] and not saved['manual']:
         saved['path'] = paths[0]
         st.session_state[field_key] = saved['path']
@@ -99,7 +103,7 @@ def manifest_input():
     def select():
         chosen = st.session_state[choice_key]
         path = '' if chosen == manual else chosen
-        st.session_state[saved_key].update(path=path, manual=chosen == manual)
+        st.session_state[saved_key].update(path=path, manual=True)
         st.session_state[field_key] = path
 
     def edit():
@@ -113,7 +117,7 @@ def manifest_input():
             format_func=lambda path: manual if path == manual else
                 f"{rows[path]['job_id'][:12]} · {rows[path]['height']}×{rows[path]['width']} · {rows[path]['traces']} traces",
             help='The latest completed preparation is selected initially. You can choose another or enter a custom path.')
-    else:
+    elif not saved['path']:
         st.info('Complete Prepare Pandar128 on this server, or enter an existing prepared manifest path below.')
     return st.text_input('Prepared manifest path on the server', key=field_key,
                          placeholder='/data/cache/manifest.json', on_change=edit).strip()
@@ -141,6 +145,38 @@ def generation_path_input(label, name, default='', help=None):
         saved.update(path=path, manual=bool(path) if name == 'checkpoint' else True)
 
     return st.text_input(label, key=field_key, on_change=edit, help=help).strip()
+
+
+def generation_setting(name, default):
+    saved = st.session_state.setdefault(f'generation_settings:{endpoint}', {})
+    key = f'generation_{name}:{endpoint}'
+    if key not in st.session_state:
+        st.session_state[key] = saved.setdefault(name, default)
+
+    def edit():
+        saved[name] = st.session_state[key]
+
+    return {'key': key, 'on_change': edit}
+
+
+def restore_generation_defaults(detected, force=False):
+    source = detected.get('training_job_id')
+    defaults = detected.get('defaults', {})
+    source_key = f'generation_source:{endpoint}'
+    if not source or not defaults or (not force and st.session_state.get(source_key) == source):
+        return
+    for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file'):
+        generation_saved_path(name).update(path=defaults.get(name, ''), manual=False)
+        st.session_state[f'{name}_field:{endpoint}'] = defaults.get(name, '')
+    st.session_state[f'generate_manifest_saved:{endpoint}'] = {'path': defaults['manifest'], 'manual': False}
+    st.session_state[f'generate_manifest_field:{endpoint}'] = defaults['manifest']
+    st.session_state[f'generate_manifest_choice:{endpoint}'] = defaults['manifest']
+    saved = st.session_state.setdefault(f'generation_settings:{endpoint}', {})
+    for name in ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'auto_conditioning', 'seed'):
+        if name in defaults:
+            saved[name] = defaults[name]
+            st.session_state[f'generation_{name}:{endpoint}'] = defaults[name]
+    st.session_state[source_key] = source
 
 
 try:
@@ -187,26 +223,41 @@ with configure:
             except httpx.HTTPError as error:
                 st.error(str(error))
     else:
-        config['manifest'] = manifest_input()
+        latest = {}
+        if action == 'generate':
+            try:
+                latest = api('POST', '/generation/inputs', json={'auto_conditioning': False}).json()
+            except httpx.HTTPError:
+                pass  # Keep manual entry available with older/unavailable APIs.
+            reset = st.button('Use detected paths', help='Restore every Generate field from the last successful training run.')
+            restore_generation_defaults(latest, force=reset)
+            if reset and not latest.get('defaults'):
+                for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file'):
+                    generation_saved_path(name).update(path='', manual=False)
+                    st.session_state[f'{name}_field:{endpoint}'] = ''
+            if latest.get('training_job_id'):
+                st.caption(f"Defaults from successful training job {latest['training_job_id'][:12]}. Manual edits remain available.")
+        defaults = latest.get('defaults', {})
+        config['manifest'] = manifest_input(defaults.get('manifest', ''), generation=action == 'generate')
+        setting = lambda name, default: generation_setting(name, default) if action == 'generate' else {'value': default}
         left, middle, right = st.columns(3)
         available_gpus = len(health['hardware']['gpus'])
+        gpu_options = setting('gpus', -1 if available_gpus else 0)
+        if action == 'generate':
+            key = gpu_options['key']
+            st.session_state[key] = min(st.session_state[key], available_gpus) if available_gpus else 0
         config['gpus'] = left.number_input('Remote GPUs (-1 = all, 0 = CPU)', -1, max(1, available_gpus),
-            -1 if available_gpus else 0,
+            **gpu_options,
             help='All visible GPUs are used by default. Set a positive count to limit the job.')
         selected_gpus = available_gpus if config['gpus'] == -1 else config['gpus']
         st.caption(f'{selected_gpus} remote GPU(s) selected. Training uses one process per GPU; independent samples run in parallel.')
-        config['sample_steps'] = middle.number_input('Sampling steps', 2, 200, 50)
-        config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, 4)
-        config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', value=True,
+        config['sample_steps'] = middle.number_input('Sampling steps', 2, 200, **setting('sample_steps', 50))
+        config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, **setting('samples_per_trace', 4))
+        config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', **setting('auto_optimize', True),
             help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
-            config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', value=True,
+            config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', **setting('auto_conditioning', True),
                 help='Create or reuse the first complete training window matching the checkpoint. Fill the scene path automatically and export real_scene.npz beside the synthetic samples.')
-            if st.button('Use detected paths', help='Replace manual checkpoint and scene paths with matching server files.'):
-                for name in ('checkpoint', 'conditioning'):
-                    generation_saved_path(name).update(path='', manual=False)
-                    st.session_state[f'{name}_field:{endpoint}'] = ''
-                st.rerun()
             detected, lookup_error = {}, ''
             if config['manifest']:
                 saved_checkpoint = generation_saved_path('checkpoint')
@@ -230,10 +281,16 @@ with configure:
                 st.caption(lookup_error or detected['diagnostic'])
             st.caption('The real scene and synthetic samples are included in the artifact download. '
                        'To generate without conditioning, turn off automatic extraction and leave the scene path blank.')
-            config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')
-            config['profile_name'] = st.text_input('Calibration profile name', 'ppo')
-            config['controller_file'] = st.text_input('Optional frozen OT controller.pt on the server',
+            selected_defaults = detected.get('defaults', {})
+            for name in ('batch_size', 'diffusion_steps', 'window'):
+                if name in selected_defaults:
+                    config[name] = selected_defaults[name]
+            config['profile_file'] = generation_path_input('Optional calibration profiles.json on the server', 'profile_file', selected_defaults.get('profile_file', ''))
+            config['profile_name'] = generation_path_input('Calibration profile name', 'profile_name', selected_defaults.get('profile_name', 'uncalibrated'))
+            config['controller_file'] = generation_path_input('Optional frozen OT controller.pt on the server', 'controller_file', selected_defaults.get('controller_file', ''),
                 help='Requires a canonical scene NPZ and the exact own checkpoint used to train this controller.')
+            if latest.get('training_job_id') and not config['controller_file']:
+                st.caption('This training run produced no frozen OT controller; the optional controller field is empty.')
         else:
             left, middle, right = st.columns(3)
             config['epochs'] = left.number_input('Epochs', 1, 10000, 5)
@@ -263,7 +320,7 @@ with configure:
                     'value_max': st.number_input('C51 maximum return support', -10000., 10000., 20.),
                 }
             st.caption(f"{'Maximum' if config['auto_optimize'] else 'Effective'} training batch: {config['batch_size'] * max(1, selected_gpus) * config['gradient_accumulation']} windows per optimizer step. Actual tuned batches appear in the logs.")
-        config['seed'] = st.number_input('Seed', 0, 2147483647, 0)
+        config['seed'] = st.number_input('Seed', 0, 2147483647, **setting('seed', 0))
         if action == 'experiment':
             st.caption('Adds E0–E5 experiments. All choices freeze on development data before final real test arrays are decoded.')
             config['checkpoint'] = st.text_input('Optional own checkpoint for adaptation (random-root provenance required)')

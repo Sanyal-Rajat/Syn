@@ -117,3 +117,52 @@ def test_recovery_does_not_select_an_untrained_checkpoint(prepared, tmp_path, hi
     else:
         path.write_text(json.dumps(history))
     assert not prepare_generation_inputs(tmp_path / 'runs', prepared)['checkpoint']
+
+
+def test_latest_successful_run_provides_all_generation_defaults(prepared, tmp_path):
+    runs = tmp_path / 'runs'
+    training_job(runs, 0, prepared)
+    older_manifest = tmp_path / 'training-manifest.json'
+    older_manifest.write_text(Path(prepared).read_text() + '\n')
+    latest = training_job(runs, 1, older_manifest, window=3)
+    request = {'manifest': str(older_manifest), 'window': 3, 'gpus': 2, 'sample_steps': 12,
+               'samples_per_trace': 7, 'auto_optimize': False, 'seed': 37, 'batch_size': 6, 'diffusion_steps': 40}
+    (latest / 'request.json').write_text(json.dumps(request))
+    (latest / 'profiles.json').write_text(json.dumps({'profiles': {'bayesian': {'theta': [0, 0, 0, 1]}}}))
+    result = json.loads((latest / 'result.json').read_text())
+    result['selected_profile_on_validation'] = 'bayesian'
+    (latest / 'result.json').write_text(json.dumps(result))
+    training_job(runs, 2, prepared, status='failed')
+    training_job(runs, 3, prepared, status='running')
+    found = prepare_generation_inputs(runs)
+    assert found['training_job_id'] == latest.name
+    defaults = found['defaults']
+    assert defaults['manifest'] == str(older_manifest)
+    assert defaults['checkpoint'] == str(latest / 'checkpoint.pt')
+    for name in ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'seed', 'batch_size', 'diffusion_steps', 'window'):
+        assert defaults[name] == request[name]
+    assert defaults['profile_file'] == str(latest / 'profiles.json') and defaults['profile_name'] == 'bayesian'
+    assert defaults['controller_file'] == ''
+    assert defaults['auto_conditioning']
+    with np.load(defaults['conditioning']) as scene:
+        assert scene['range'].shape == (3, 4, 16)
+
+
+def test_latest_defaults_do_not_invent_optional_files_or_use_failed_jobs(prepared, tmp_path):
+    runs = tmp_path / 'runs'
+    training_job(runs, 0, prepared, status='failed')
+    assert not prepare_generation_inputs(runs)['defaults']
+    folder = training_job(runs, 1, prepared)
+    defaults = prepare_generation_inputs(runs, auto_conditioning=False)['defaults']
+    assert defaults['checkpoint'] == str(folder / 'checkpoint.pt')
+    assert defaults['profile_file'] == defaults['controller_file'] == defaults['conditioning'] == ''
+    assert defaults['profile_name'] == 'uncalibrated'
+    (folder / 'ppo_policy.pt').write_bytes(b'calibration policy is not an OT generation controller')
+    assert prepare_generation_inputs(runs, auto_conditioning=False)['defaults']['controller_file'] == ''
+    controller = folder / 'controller.pt'
+    controller.write_bytes(b'controller explicitly recorded by this training run')
+    result_path = folder / 'result.json'
+    result = json.loads(result_path.read_text())
+    result['generation_controller'] = str(controller)
+    result_path.write_text(json.dumps(result))
+    assert prepare_generation_inputs(runs, auto_conditioning=False)['defaults']['controller_file'] == str(controller)

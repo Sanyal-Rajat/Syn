@@ -173,8 +173,8 @@ def detected_remote(prepared_remote, monkeypatch):
         if url.endswith('/generation/inputs'):
             values = kwargs['json']
             lookups.append(values)
-            version = 'new' if values['manifest'] == choices[0]['manifest'] else 'old'
-            result = {'checkpoint': values['checkpoint'] or f'/remote/{version}/train/checkpoint.pt',
+            version = 'new' if values.get('manifest', choices[0]['manifest']) == choices[0]['manifest'] else 'old'
+            result = {'checkpoint': values.get('checkpoint') or f'/remote/{version}/train/checkpoint.pt',
                       'conditioning': f'/remote/{version}/real_scene.npz' if values['auto_conditioning'] else '',
                       'checkpoints': []}
             return httpx.Response(200, json=result, request=httpx.Request(method, url))
@@ -182,6 +182,113 @@ def detected_remote(prepared_remote, monkeypatch):
 
     monkeypatch.setattr(httpx, 'request', request)
     return submitted, choices, lookups
+
+
+@pytest.fixture
+def latest_training_remote(prepared_remote, monkeypatch):
+    submitted, choices = prepared_remote
+    original = httpx.request
+    source = {'training_job_id': 'd' * 32, 'defaults': {
+        'manifest': choices[1]['manifest'], 'checkpoint': '/remote/success/train/checkpoint.pt',
+        'conditioning': '/remote/success/real_scene.npz', 'gpus': 2, 'sample_steps': 12,
+        'samples_per_trace': 7, 'auto_optimize': False, 'auto_conditioning': True, 'seed': 37,
+        'profile_file': '/remote/success/train/profiles.json', 'profile_name': 'bayesian',
+        'controller_file': '', 'batch_size': 6, 'diffusion_steps': 40, 'window': 3}}
+
+    def request(method, url, **kwargs):
+        if url.endswith('/health'):
+            return httpx.Response(200, json={'status': 'ok', 'hardware': {'gpus': [{'id': i} for i in range(4)]}},
+                                  request=httpx.Request(method, url))
+        if url.endswith('/generation/inputs'):
+            values = kwargs['json']
+            defaults = dict(source['defaults'])
+            defaults['checkpoint'] = values.get('checkpoint') or defaults['checkpoint']
+            if not values.get('auto_conditioning', True):
+                defaults['conditioning'] = ''
+            result = {**source, 'defaults': defaults, 'checkpoint': defaults['checkpoint'],
+                      'conditioning': defaults['conditioning'], 'checkpoints': [], 'diagnostic': ''}
+            return httpx.Response(200, json=result, request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    return submitted, source, choices
+
+
+def test_generate_defaults_every_field_from_last_successful_training(latest_training_remote):
+    from lidarpoc.config import RunConfig
+    submitted, source, choices = latest_training_remote
+    defaults = source['defaults']
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    assert not app.exception
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[1]['manifest']
+    for label, name in [('Own checkpoint path on the server', 'checkpoint'),
+                        ('Optional synthetic scene NPZ on the server', 'conditioning'),
+                        ('Optional calibration profiles.json on the server', 'profile_file'),
+                        ('Calibration profile name', 'profile_name'),
+                        ('Optional frozen OT controller.pt on the server', 'controller_file')]:
+        assert next(field for field in app.text_input if field.label == label).value == defaults[name]
+    for label, name in [('Remote GPUs (-1 = all, 0 = CPU)', 'gpus'), ('Sampling steps', 'sample_steps'),
+                        ('Evaluation windows per trace / generated samples', 'samples_per_trace'), ('Seed', 'seed')]:
+        assert next(field for field in app.number_input if field.label == label).value == defaults[name]
+    assert not next(field for field in app.checkbox if field.label == 'Automatically optimize GPU throughput').value
+    assert next(field for field in app.checkbox if field.label == 'Automatically extract a real scene from the prepared dataset').value
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    config = RunConfig(**submitted[-1])
+    for name, value in defaults.items():
+        assert getattr(config, name) == value
+
+
+def test_generation_edits_persist_and_reset_restores_all_training_defaults(latest_training_remote):
+    _, source, _ = latest_training_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    next(field for field in app.number_input if field.label == 'Sampling steps').set_value(18).run()
+    next(field for field in app.number_input if field.label == 'Seed').set_value(99).run()
+    next(field for field in app.text_input if field.label == 'Calibration profile name').set_value('custom').run()
+    app.radio[0].set_value('Prepare Pandar128').run()
+    app.radio[0].set_value('Generate').run()
+    assert next(field for field in app.number_input if field.label == 'Sampling steps').value == 18
+    assert next(field for field in app.number_input if field.label == 'Seed').value == 99
+    assert next(field for field in app.text_input if field.label == 'Calibration profile name').value == 'custom'
+    next(button for button in app.button if button.label == 'Use detected paths').click().run()
+    assert not app.exception
+    assert next(field for field in app.number_input if field.label == 'Sampling steps').value == source['defaults']['sample_steps']
+    assert next(field for field in app.number_input if field.label == 'Seed').value == source['defaults']['seed']
+    assert next(field for field in app.text_input if field.label == 'Calibration profile name').value == 'bayesian'
+
+
+def test_new_successful_training_refreshes_the_default_set(latest_training_remote):
+    _, source, choices = latest_training_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    source['training_job_id'] = 'e' * 32
+    source['defaults'].update(manifest=choices[0]['manifest'], checkpoint='/remote/next/checkpoint.pt',
+                              profile_file='/remote/next/profiles.json', profile_name='ppo', seed=81, sample_steps=8)
+    app.run()
+    assert not app.exception
+    assert next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').value == choices[0]['manifest']
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/next/checkpoint.pt'
+    assert next(field for field in app.number_input if field.label == 'Seed').value == 81
+    assert next(field for field in app.text_input if field.label == 'Calibration profile name').value == 'ppo'
+
+
+@pytest.mark.parametrize('available', [0, 1])
+def test_inherited_gpu_count_fits_current_server_hardware(latest_training_remote, monkeypatch, available):
+    original = httpx.request
+
+    def request(method, url, **kwargs):
+        if url.endswith('/health'):
+            return httpx.Response(200, json={'status': 'ok', 'hardware': {'gpus': [{'id': i} for i in range(available)]}},
+                                  request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    assert not app.exception
+    assert next(field for field in app.number_input if field.label == 'Remote GPUs (-1 = all, 0 = CPU)').value == available
 
 
 def test_generate_automatically_fills_matching_checkpoint_and_scene(detected_remote):

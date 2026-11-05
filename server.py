@@ -93,7 +93,7 @@ def prepared():
 
 
 class GenerationInputsRequest(BaseModel):
-    manifest: str
+    manifest: str = ''
     checkpoint: str = ''
     auto_conditioning: bool = True
 

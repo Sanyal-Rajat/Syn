@@ -271,8 +271,22 @@ surfaces to the configured tolerance. This is ray-space conditioning, not scene
 reconstruction. The original calibration metrics describe sensor-frame persistence;
 the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
-**Generate** fills the checkpoint field from the latest completed training job
-matching the selected frozen manifest. If no completed report is available, it
+**Generate** fills its fields from the **last successful training run** by default.
+It selects that run's frozen manifest, checkpoint, sampling steps, sample count,
+seed, throughput optimization settings, and `profiles.json` with the profile
+selected on validation. A newer dataset preparation does not replace the training
+manifest. The inherited GPU count is capped by the GPUs currently visible on the
+server; no visible GPUs selects CPU. An OT controller is filled only when that run
+explicitly recorded an existing generation controller. Calibration policy files
+such as `ppo_policy.pt` are not substituted for OT controllers. If the run produced
+no controller, the optional field remains empty.
+
+Manual edits persist for the current source run, including when switching
+operations. **Use detected paths** restores all Generate fields to the last
+successful training defaults. A newly completed training run refreshes the default
+set together, preventing a mixture of unrelated manifests and saved artifacts.
+When selecting another manifest manually, checkpoint discovery still requires a
+matching frozen manifest. If no completed report is available for that manifest, it
 also checks saved `checkpoint.pt` files in older/interrupted jobs and experiment
 subfolders. Recovery requires matching recorded manifest metadata, a recorded
 training epoch and a nonempty checkpoint file. It skips active jobs and untrained
@@ -531,7 +545,7 @@ All API paths below are relative to `http://127.0.0.2:9000` on the client:
 | GET | `/metrics/gpu` | Current server GPU telemetry |
 | GET | `/dataset/prepared` | Discover completed prepared manifests |
 | POST | `/dataset/inspect` | Inspect NPZ schemas; body: `{"root":"/server/path"}` |
-| POST | `/generation/inputs` | Discover matching checkpoints and prepare/reuse a real-scene path; body: `{"manifest":"/server/manifest.json"}`, optional `checkpoint` and `auto_conditioning` |
+| POST | `/generation/inputs` | Return Generate defaults and a real-scene path; `{}` selects the last successful training run, or supply `manifest` to discover matching checkpoints. Optional `checkpoint` and `auto_conditioning`. |
 | POST | `/jobs` | Submit a `RunConfig` request; returns the job ID |
 | GET | `/jobs` | List recent jobs |
 | GET | `/jobs/{job_id}` | Status, progress, training metrics and recent log text |

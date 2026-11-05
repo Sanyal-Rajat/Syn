@@ -62,6 +62,13 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert detected['checkpoint'] == report['checkpoint']
         assert Path(detected['conditioning']).is_file()
         assert detected['checkpoints'][0]['job_id'] == identifier
+        latest = client.post('/generation/inputs', json={})
+        assert latest.status_code == 200, latest.text
+        latest = latest.json()
+        assert latest['training_job_id'] == identifier
+        assert latest['defaults']['manifest'] == prepared
+        assert latest['defaults']['profile_name'] == report['selected_profile_on_validation']
+        assert latest['defaults']['profile_file'] == str(server.ROOT / identifier / 'profiles.json')
         assert 'ppo' in report['profiles']
         output = client.get(f'/jobs/{identifier}/logs').json()
         assert 'Epoch metrics:' in output['text']
@@ -74,9 +81,8 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert pdf.status_code == 200 and pdf.headers['content-type'] == 'application/pdf'
         assert pdf.content.startswith(b'%PDF-')
         assert 'LICENSES/MODEL-MIT.txt' in archive.namelist()
-        generation = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
-            'checkpoint': str(Path(report['checkpoint']).parent), 'gpus': 0, 'sample_steps': 2, 'samples_per_trace': 1,
-            'profile_file': str(server.ROOT / identifier / 'profiles.json'), 'profile_name': 'ppo'})
+        generation = client.post('/jobs', json={'action': 'generate', **latest['defaults'],
+            'checkpoint': str(Path(report['checkpoint']).parent)})
         assert generation.status_code == 202, generation.text
         generation_id = generation.json()['id']
         deadline = time.monotonic() + 60
@@ -88,8 +94,8 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert state['status'] == 'completed', state
         generated = client.get(f'/jobs/{generation_id}/result').json()
         assert generated['checkpoint'] == report['checkpoint']
-        assert generated['calibration_profile'] == 'ppo'
-        assert generated['conditioning_source']['split'] == 'train'
+        assert generated['calibration_profile'] == report['selected_profile_on_validation']
+        assert generated['conditioning_source']['path'] == latest['defaults']['conditioning']
         assert generated['geometry']['new_surface_returns'] == 0
         reference_path = generated['real_scene']
         assert Path(reference_path).name == 'real_scene.npz'
