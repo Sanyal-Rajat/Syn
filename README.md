@@ -330,6 +330,24 @@ display; the NPZ and range/intensity images retain their data. To start with all
 extents visible, add `--view-radius 0`. Regenerate previously exported HTML files
 with the updated viewer to get these controls.
 
+The HTML also embeds matching recorded-camera, real-LiDAR-overlay and synthetic-
+LiDAR-overlay images when the downloaded `overlays/` folder is beside the NPZ.
+Keep that folder when extracting the artifact ZIP. Frame and sample selection use
+`overlays/manifest.json`; the exported image filenames also work without a
+manifest. Images are embedded in the HTML, so the finished HTML works offline
+without separate image files. For images stored elsewhere:
+
+```bash
+python view_syn_npz.py /home/r/lidarpoc/sample_000.npz --output sample.html \
+  --overlay-dir /path/to/downloaded/overlays
+```
+
+If camera generation failed, the HTML and terminal show the reason from the
+downloaded `result.json`. A LiDAR NPZ contains no RGB image by itself. Rebuild
+camera overlays on the compute server with the command below, download the
+updated artifacts again, then rerun the viewer; no diffusion retraining or
+sampling is required.
+
 LiDAR scan rings and gaps between returns remain visible, especially at longer
 ranges. The viewer displays measured/generated points rather than RGB images or
 textured surfaces. Compare the same frame in `real_scene.npz` and `sample_000.npz`

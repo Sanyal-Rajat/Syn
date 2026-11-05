@@ -1,5 +1,6 @@
 """Inspect a numeric Syn NPZ and export an offline, interactive LiDAR viewer."""
 import argparse
+import base64
 from html import escape
 import json
 from pathlib import Path
@@ -61,7 +62,82 @@ def scene_ranges(points, radius):
     return {f'scene.{axis}axis.range': limits.tolist() for axis, limits in zip('xyz', bounds)}
 
 
-def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_radius=30):
+def camera_section(path, frame, overlay_dir=None):
+    """Embed the selected frame's local camera artifacts; never fetch remote images."""
+    path = Path(path)
+    folder = Path(overlay_dir) if overlay_dir else path.parent / 'overlays'
+    if overlay_dir is not None and not folder.is_dir():
+        raise ValueError(f'Overlay directory not found: {folder}')
+    protected = {folder / 'manifest.json', path.parent / 'result.json'}
+    info, reason = {}, ''
+    try:
+        if (folder / 'manifest.json').is_file():
+            info = json.loads((folder / 'manifest.json').read_text())
+        elif overlay_dir is None and (path.parent / 'result.json').is_file():
+            info = json.loads((path.parent / 'result.json').read_text()).get('camera_overlays', {})
+        if not isinstance(info, dict):
+            raise ValueError('Expected a camera metadata object')
+        if info.get('status') == 'unavailable':
+            reason = info.get('reason', 'Camera overlay generation was unavailable.')
+        elif info.get('status') == 'disabled':
+            reason = 'Camera overlays were disabled for this job.'
+        row = next((row for row in info.get('frames', []) if row['frame'] == frame), None)
+        if row is not None:
+            selected = next((item for item in [row.get('real', {}), *row.get('synthetic', [])]
+                             if item.get('sample') == path.name), None)
+            if selected is None:
+                reason = f'No camera overlay is recorded for {path.name}, frame {frame}.'
+            images = [('Recorded camera image', row.get('camera')),
+                      ('Real LiDAR on recorded RGB', row.get('real', {}).get('file'))]
+            if selected and selected != row.get('real'):
+                images.append(('Synthetic LiDAR on recorded RGB', selected.get('file')))
+        elif info.get('frames'):
+            reason = f'No camera images are recorded for frame {frame}.'
+            images = []
+        else:
+            # Support copying just the exported PNG/JPG files, without their manifest.
+            images = [('Recorded camera image', f'camera_{frame:03d}.jpg'),
+                      ('Real LiDAR on recorded RGB', f'real_frame_{frame:03d}.png')]
+            if path.stem != 'real_scene':
+                images.append(('Synthetic LiDAR on recorded RGB', f'{path.stem}_frame_{frame:03d}.png'))
+        figures, missing = [], []
+        if not reason:
+            for label, name in images:
+                if not name:
+                    continue
+                source = (folder / name).resolve()
+                if source.parent != folder.resolve() or source.suffix.lower() not in ('.jpg', '.jpeg', '.png'):
+                    raise ValueError('Camera artifact images must be PNG/JPG files inside the overlay directory')
+                if not source.is_file():
+                    missing.append(name)
+                    continue
+                protected.add(source)
+                kind = 'png' if source.suffix.lower() == '.png' else 'jpeg'
+                encoded = base64.b64encode(source.read_bytes()).decode('ascii')
+                figures.append(f'<figure><figcaption>{escape(label)}</figcaption>'
+                               f'<img alt="{escape(label)}" src="data:image/{kind};base64,{encoded}"></figure>')
+        if figures:
+            print(f'Embedded {len(figures)} camera images from {folder.resolve()}')
+            warning = ''
+            if missing:
+                warning = '<p class="notice">Missing camera artifacts: ' + escape(', '.join(missing)) + '. Extract the complete updated artifact ZIP.</p>'
+                print('Missing camera artifacts:', ', '.join(missing))
+            return (f'<section><h2>Camera views · {escape(path.name)} · frame {frame}</h2>'
+                    '<p>Recorded RGB background; synthetic LiDAR is overlaid on the matching camera frame.</p>'
+                    f'{warning}<div class="camera-grid">{"".join(figures)}</div></section>'), protected
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        reason = f'Cannot read camera artifacts: {error}'
+    reason = reason or f'No camera images found in {folder.resolve()}.'
+    message = ('Rebuild camera overlays for the completed Generate job on the compute server, then download '
+               'and extract the artifact ZIP again, keeping overlays/ beside the NPZ files. '
+               'Use --overlay-dir /path/to/overlays if they are stored elsewhere. '
+               'The LiDAR NPZ itself does not contain an RGB image.')
+    print(f'Camera images unavailable: {reason}\n{message}')
+    return (f'<section class="notice"><h2>Camera images unavailable</h2><p>{escape(reason)}</p>'
+            f'<p>{escape(message)}</p></section>'), protected
+
+
+def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_radius=30, overlay_dir=None):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
 
@@ -76,6 +152,9 @@ def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_
     ranges, valid, intensity, elevations, points = load_frame(path, frame, manifest)
     if not len(points):
         raise ValueError('Selected frame has no valid LiDAR returns')
+    camera_html, image_inputs = camera_section(path, frame, overlay_dir)
+    if output.resolve() in {source.resolve() for source in image_inputs}:
+        raise ValueError('HTML output must not overwrite a camera input file')
     extents = list(dict.fromkeys((view_radius, 10, 30, 60, 0)))
     views = [{'label': f'Within ±{radius:g} m' if radius else 'Full scene', 'method': 'relayout',
               'args': [scene_ranges(points, radius)]} for radius in extents]
@@ -125,7 +204,16 @@ def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_
     fig.add_annotation(text='Drag to orbit · Scroll to zoom · View controls change the display only; NPZ data is unchanged.',
                        x=.5, y=-.11, xref='paper', yref='paper', showarrow=False)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_html(str(output), include_plotlyjs=True, auto_open=False)
+    plot = fig.to_html(full_html=False, include_plotlyjs=True)
+    output.write_text('<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{escape(path.name)} · frame {frame}</title><style>'
+        'body{margin:0;background:#111827;color:#e2e8f0;font:16px system-ui,sans-serif}'
+        'main{max-width:1600px;margin:auto}section{padding:20px}h2{font-size:20px}'
+        '.camera-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}'
+        'figure{margin:0}figcaption{padding:8px 0}img{display:block;width:100%;height:auto}'
+        '.notice{margin:16px;background:#292519;border-left:4px solid #d6a850}'
+        f'</style></head><body><main>{camera_html}{plot}</main></body></html>', encoding='utf-8')
     print('Open in your browser:', output.resolve())
     return output
 
@@ -139,8 +227,9 @@ if __name__ == '__main__':
     parser.add_argument('--max-points', type=int, default=30000, help='Maximum displayed 3D points; range images retain all returns')
     parser.add_argument('--view-radius', type=float, default=30,
                         help='Initial X/Y half-width in metres (default: 30); 0 fits the full scene')
+    parser.add_argument('--overlay-dir', type=Path, help='Camera overlay artifacts (default: overlays/ beside the NPZ)')
     args = parser.parse_args()
     try:
-        visualize(args.npz, args.frame, args.output, args.manifest, args.max_points, args.view_radius)
+        visualize(args.npz, args.frame, args.output, args.manifest, args.max_points, args.view_radius, args.overlay_dir)
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
