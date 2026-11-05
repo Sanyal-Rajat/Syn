@@ -165,14 +165,15 @@ def restore_generation_defaults(detected, force=False):
     source_key = f'generation_source:{endpoint}'
     if not source or not defaults or (not force and st.session_state.get(source_key) == source):
         return
-    for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file'):
+    for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file', 'camera_calibration'):
         generation_saved_path(name).update(path=defaults.get(name, ''), manual=False)
         st.session_state[f'{name}_field:{endpoint}'] = defaults.get(name, '')
     st.session_state[f'generate_manifest_saved:{endpoint}'] = {'path': defaults['manifest'], 'manual': False}
     st.session_state[f'generate_manifest_field:{endpoint}'] = defaults['manifest']
     st.session_state[f'generate_manifest_choice:{endpoint}'] = defaults['manifest']
     saved = st.session_state.setdefault(f'generation_settings:{endpoint}', {})
-    for name in ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'auto_conditioning', 'seed'):
+    for name in ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'auto_conditioning', 'seed',
+                 'camera_overlay', 'camera_model', 'camera_timestamp_unit', 'camera_max_skew_ms'):
         if name in defaults:
             saved[name] = defaults[name]
             st.session_state[f'generation_{name}:{endpoint}'] = defaults[name]
@@ -232,7 +233,7 @@ with configure:
             reset = st.button('Use detected paths', help='Restore every Generate field from the last successful training run.')
             restore_generation_defaults(latest, force=reset)
             if reset and not latest.get('defaults'):
-                for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file'):
+                for name in ('checkpoint', 'conditioning', 'profile_file', 'profile_name', 'controller_file', 'camera_calibration'):
                     generation_saved_path(name).update(path='', manual=False)
                     st.session_state[f'{name}_field:{endpoint}'] = ''
             if latest.get('training_job_id'):
@@ -291,6 +292,18 @@ with configure:
                 help='Requires a canonical scene NPZ and the exact own checkpoint used to train this controller.')
             if latest.get('training_job_id') and not config['controller_file']:
                 st.caption('This training run produced no frozen OT controller; the optional controller field is empty.')
+            config['camera_overlay'] = st.checkbox('Overlay synthetic LiDAR on recorded camera images', **setting('camera_overlay', True),
+                help='Match the conditioning trace to timestamped camera frames, export PNG comparisons, and display them in results. Unavailable inputs are reported without stopping LiDAR generation.')
+            with st.expander('Camera overlay settings'):
+                config['camera_calibration'] = generation_path_input('Optional camera calibration JSON on the server', 'camera_calibration',
+                    selected_defaults.get('camera_calibration', ''),
+                    help='Leave blank for the bundled Pandar128 mounting parameters. An explicit optical camera_from_sensor calibration can override mounting/distortion assumptions.')
+                config['camera_model'] = st.selectbox('Camera projection model', ['rational', 'pinhole'], **setting('camera_model', 'rational'),
+                    help='Rational applies radial/tangential distortion. Pinhole is for rectified images with matching rectified intrinsics.')
+                config['camera_timestamp_unit'] = st.selectbox('Source camera/odometry timestamp unit', ['s', 'ms', 'us', 'ns'],
+                    **setting('camera_timestamp_unit', 's'))
+                config['camera_max_skew_ms'] = st.number_input('Maximum camera time difference (ms)', 1., 1000.,
+                    **setting('camera_max_skew_ms', 50.))
         else:
             left, middle, right = st.columns(3)
             config['epochs'] = left.number_input('Epochs', 1, 10000, 5)
@@ -452,6 +465,27 @@ def monitor():
                 st.write('Real conditioning scene on the remote server:')
                 st.code(report['real_scene'])
                 st.caption('Download artifacts to get real_scene.npz and sample_*.npz for comparison in the same viewer.')
+            overlays = report.get('camera_overlays', {})
+            if overlays.get('status') == 'completed':
+                st.subheader('Synthetic LiDAR on recorded camera images')
+                st.caption(overlays['background'])
+                frames = overlays['frames']
+                selected = st.selectbox('Overlay frame', range(len(frames)), key=f'overlay_frame:{job_id}')
+                frame = frames[selected]
+                samples = frame['synthetic']
+                chosen = st.selectbox('Synthetic overlay sample', range(len(samples)), key=f'overlay_sample:{job_id}',
+                    format_func=lambda index: samples[index]['sample'])
+                for panel, record, label in zip(st.columns(2), (frame['real'], samples[chosen]), ('Real LiDAR', 'Synthetic LiDAR')):
+                    key = f'overlay:{cache}:{record["file"]}'
+                    if key not in st.session_state:
+                        st.session_state[key] = api('GET', f'/jobs/{job_id}/overlays/{record["file"]}', timeout=60).content
+                    panel.image(st.session_state[key], caption=f'{label} on the same recorded RGB frame')
+                st.caption(f"LiDAR source frame {frame['lidar_frame']} · camera frame {frame['camera_frame']} · time difference {frame['skew_ms']:.3f} ms. Depth colours: blue 0 m, green 40 m, red 80 m and beyond.")
+                with st.expander('Camera alignment details'):
+                    st.write(overlays['calibration_convention'])
+                    st.write(overlays['limitations'])
+            elif overlays.get('status') == 'unavailable':
+                st.info('Camera overlay unavailable: ' + overlays['reason'])
         elif report['action'] == 'experiment':
             st.write(f"Selected on development data: {report['selected_arm']}")
             st.dataframe([{'arm': name, 'test_OT_gap': value['mean'], 'session_CI95': str(value['ci95'])}

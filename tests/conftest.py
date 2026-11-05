@@ -33,3 +33,28 @@ def prepared(tmp_path):
                        elevations_file=str(beam_file), height=4, width=16, window=2, max_frames=4)
     manifest = prepare(config, tmp_path / 'prepared', license_gate())
     return manifest
+
+
+@pytest.fixture
+def camera_inputs(prepared, tmp_path):
+    """Timestamped publisher-shaped RGB records, deliberately offset from scan indices."""
+    import json
+    from pathlib import Path
+    from lidarpoc.data.split_manifest import load_manifest
+
+    manifest = load_manifest(prepared)
+    trace = manifest['splits']['train'][0]
+    scan = Path(trace['source_file'])
+    odometry = np.zeros(4, dtype=[('t', 'f8')])
+    odometry['t'] = 10 + np.arange(4) * .05
+    np.savez(scan.with_name(trace['sequence_id'] + '_odom_list.npz'), data=odometry)
+    camera = np.zeros(6, dtype=[('t', 'f8'), ('data', 'u1', (90, 160, 3))])
+    camera['t'] = [9.9, 9.967, 10.001, 10.034, 10.067, 10.1]
+    for index in range(len(camera)):
+        camera['data'][index, :, :, 0] = index * 20
+        camera['data'][index, 45:, :, 1] = 100
+    np.savez(scan.with_name(trace['sequence_id'] + '_video_list.npz'), data=camera)
+    calibration = tmp_path / 'camera.json'
+    calibration.write_text(json.dumps({'camera_from_sensor': [[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]],
+        'camera_matrix': [[60, 0, 80], [0, 60, 45], [0, 0, 1]], 'image_size': [160, 90], 'model': 'pinhole'}))
+    return scan, calibration

@@ -66,7 +66,8 @@ def generation_defaults(run):
     from .config import RunConfig
 
     names = ('gpus', 'sample_steps', 'samples_per_trace', 'auto_optimize', 'auto_conditioning',
-             'seed', 'batch_size', 'diffusion_steps', 'window')
+             'seed', 'batch_size', 'diffusion_steps', 'window', 'camera_overlay', 'camera_model',
+             'camera_timestamp_unit', 'camera_max_skew_ms', 'camera_calibration')
     values = RunConfig(action='generate', manifest=run['manifest'], checkpoint=run['checkpoint'],
                        **{name: run['request'][name] for name in names if name in run['request']}).model_dump()
     defaults = {name: values[name] for name in names}

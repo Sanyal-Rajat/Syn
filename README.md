@@ -335,6 +335,70 @@ ranges. The viewer displays measured/generated points rather than RGB images or
 textured surfaces. Compare the same frame in `real_scene.npz` and `sample_000.npz`
 to distinguish acquisition sparsity from geometry or returns lost by generation.
 
+**Camera overlays for synthetic data.** In **Generate**, leave **Overlay synthetic
+LiDAR on recorded camera images** enabled and use real-scene conditioning.
+The worker exports the generated LiDAR on the corresponding recorded RGB image,
+plus a real-LiDAR overlay for comparison. In **Monitor and results**, select the
+overlay frame and synthetic sample. The background is a recorded camera image;
+this feature generates LiDAR overlays, not new RGB observations. The artifact ZIP
+includes `overlays/camera_*.jpg`, `real_frame_*.png`, `sample_*_frame_*.png`,
+`calibration.json` and a timestamp/projection manifest inside `overlays/`.
+
+Camera extraction is deferred until generation, and extracts only the conditioning
+trace's `*_video_list.npz` and any missing `*_odom_list.npz` from the pinned cached
+archives. Existing scan-only datasets therefore need no new preparation or
+training. If an archive was removed, the download receipt identifies the pinned
+archive to fetch again. For a manually supplied dataset without cached archives,
+place the matching camera and odometry NPZ files beside the source scan. Numeric
+camera records are memory-mapped; compressed numeric members use temporary disk
+space. Large object-array variants require sufficient RAM and are rejected before
+loading if their uncompressed member exceeds 40% of available RAM.
+
+Pairing follows the publisher's [timestamp-based camera selection](https://github.com/filipberanek/lane_lines_dataset/blob/main/article_visualizations/create_videos.py):
+use the source LiDAR frame's odometry `t` and find the closest camera `t`. Camera
+and LiDAR frame indices can differ. The default timestamp unit is seconds and the
+maximum difference is 50 ms; change these under **Camera overlay settings** if
+the source records use other units. Nominal prepared 20 Hz timestamps are never
+used to pair images. New real/synthetic NPZ files retain `source_scan_file` and
+`source_frame_indices`; old automatic scene caches can recover this provenance
+only when their ranges and masks exactly match the first training window. An
+independent/unconditional scene has no corresponding recorded image. Missing
+camera data, timestamps or provenance produces a visible explanation in the UI,
+logs and report while keeping LiDAR outputs usable.
+
+Projection removes points behind the camera/outside the image and keeps the
+nearest return per pixel. Real and synthetic overlays share depth colours and
+camera geometry. The bundled mounting interpretation assumes vehicle/body axes
+X forward, Y left, Z up, ZYX yaw/pitch/roll, then converts to optical X right,
+Y down, Z forward. The default rational distortion uses OpenCV ordering
+`[K1,K2,P1,P2,K3,K4,0,0]`, with K4 in the denominator. The publisher's mounting
+file does not explicitly establish these conventions; compare the real overlay
+against visible scene edges before treating registration as accurate. The
+assumptions are recorded in the output. Timestamp matching does not compensate
+vehicle/object motion, rolling shutter or all RGB occlusions.
+
+For verified calibration or rectified images, supply an explicit camera JSON in
+**Camera overlay settings**. It needs `camera_from_sensor` (rigid 4×4 transform
+from the prepared LiDAR sensor frame to optical coordinates), `camera_matrix`
+(3×3 intrinsics), `image_size` (`[width,height]`), `model` (`rational` or
+`pinhole`) and optional `distortion` (0, 4, 5 or 8 OpenCV-ordered coefficients).
+`overlays/calibration.json` uses this portable schema. Intrinsics scale for
+uniform image resizing; cropped images need their own calibrated intrinsics.
+
+To add overlays to an existing completed Generate job without rerunning diffusion,
+run on the compute machine with the dataset and updated server dependencies:
+
+```bash
+python -m lidarpoc.camera_overlay --job runs/GENERATE_JOB_ID
+# Override calibration or timestamp units when needed:
+python -m lidarpoc.camera_overlay --job runs/GENERATE_JOB_ID \
+  --calibration /path/to/verified_camera.json --timestamp-unit s --max-skew-ms 50
+```
+
+This writes the images and updates that job's `result.json` and PDF. Refresh the
+client page to reload a previously cached result. Install `requirements-server.txt`
+after updating; Pillow is the only additional dependency for this feature.
+
 This automation supplies conditioning geometry; it does not establish that the
 diffusion model has learned realistic scenes. The existing surface-deviation and
 ray-mask constraints still apply.

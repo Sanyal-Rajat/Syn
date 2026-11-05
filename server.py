@@ -259,12 +259,22 @@ def artifacts(job_id: str):
         for file in (Path(__file__).parent / 'LICENSES').iterdir():
             if file.is_file():
                 archive.write(file, f'LICENSES/{file.name}')
-        for folder in ('experiments', 'scenes'):
+        for folder in ('experiments', 'scenes', 'overlays'):
             for file in (path / folder).rglob('*'):
-                if file.is_file():
+                if file.is_file() and file.resolve().is_relative_to(path.resolve()):
                     archive.write(file, str(file.relative_to(path)))
     return Response(buffer.getvalue(), media_type='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="lidarpoc-{job_id}.zip"'})
+
+
+@app.get('/jobs/{job_id}/overlays/{filename}')
+def overlay_image(job_id: str, filename: str):
+    folder = job_dir(job_id) / 'overlays'
+    path = (folder / filename).resolve()
+    if (not path.is_relative_to(folder.resolve()) or path.parent != folder.resolve()
+            or path.suffix not in ('.png', '.jpg') or not path.is_file()):
+        raise HTTPException(404, 'Unknown overlay image')
+    return FileResponse(path, media_type='image/png' if path.suffix == '.png' else 'image/jpeg')
 
 
 if __name__ == '__main__':

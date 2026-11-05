@@ -47,6 +47,11 @@ class RunConfig(BaseModel):
     budget: int = Field(30, ge=6, le=5000)
     conditioning: str = ''
     auto_conditioning: bool = True
+    camera_overlay: bool = True
+    camera_calibration: str = ''
+    camera_model: Literal['rational', 'pinhole'] = 'rational'
+    camera_timestamp_unit: Literal['s', 'ms', 'us', 'ns'] = 's'
+    camera_max_skew_ms: float = Field(50., gt=0, le=1000)
     profile_file: str = ''
     profile_name: str = 'ppo'
     controller_file: str = ''

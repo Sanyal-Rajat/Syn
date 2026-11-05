@@ -117,6 +117,13 @@ def findings(report):
         if report.get('real_scene'):
             text.append(f"Exported conditioning scene: {report['real_scene']}. "
                         'This contains the input geometry, not an independently generated real-world scene.')
+        overlays = report.get('camera_overlays', {})
+        if overlays.get('status') == 'completed':
+            text.append(f"Camera overlays: {len(overlays['frames'])} timestamp-matched frames. "
+                        'The RGB background is recorded; the overlaid LiDAR is synthetic. '
+                        'Alignment is a visual check, not a geometric fidelity score.')
+        elif overlays.get('status') == 'unavailable':
+            text.append('Camera overlays unavailable: ' + overlays['reason'])
     return text
 
 

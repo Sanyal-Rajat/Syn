@@ -162,9 +162,13 @@ def _run(config, directory):
             differences = [abs(sample['range'][sample['valid']] - reference[sample['valid']]) for sample in generated]
             geometry = {'new_surface_returns': 0,
                         'max_surface_deviation_m': max((float(value.max()) for value in differences if len(value)), default=0.)}
+        sample_metadata = {'elevations': np.asarray(manifest['sensor_meta']['elevations'])}
+        if real_scene:
+            with np.load(real_scene, allow_pickle=False) as scene:
+                sample_metadata.update({key: scene[key] for key in ('source_scan_file', 'source_frame_indices') if key in scene})
         for index, sample in enumerate(generated):
             np.savez_compressed(directory / f'sample_{index:03d}.npz', **sample,
-                                elevations=np.asarray(manifest['sensor_meta']['elevations']))
+                                **sample_metadata)
         report = {'action': 'generate', 'samples': len(generated), 'checkpoint': str(checkpoint_path),
                   'conditioning': config.conditioning or None, 'pretrained_weights_used': False}
         report['real_scene'] = real_scene
@@ -172,6 +176,8 @@ def _run(config, directory):
         report['geometry'] = geometry
         report['calibration_profile'] = config.profile_name if config.profile_file else 'uncalibrated'
         report['generation_controller'] = config.controller_file or None
+        from .camera_overlay import export_overlays
+        report['camera_overlays'] = export_overlays(config, manifest, directory, real_scene, progress)
         write_json(directory / 'result.json', report)
         progress('completed', 1)
         return report

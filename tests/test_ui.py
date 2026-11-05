@@ -236,8 +236,55 @@ def test_generate_defaults_every_field_from_last_successful_training(latest_trai
     next(button for button in app.button if button.label == 'Start remote job').click().run()
     assert not app.exception
     config = RunConfig(**submitted[-1])
+    assert config.camera_overlay
     for name, value in defaults.items():
         assert getattr(config, name) == value
+
+
+@pytest.mark.parametrize('status', ['completed', 'unavailable'])
+def test_generated_camera_overlays_are_shown_from_remote_images(remote, monkeypatch, status):
+    import io
+    from PIL import Image
+
+    original = httpx.request
+    fetched = []
+    image = io.BytesIO()
+    Image.new('RGB', (160, 90), 'gray').save(image, format='PNG')
+    job_id = 'f' * 32
+    state = {'id': job_id, 'action': 'generate', 'status': 'completed'}
+    overlays = {'status': status, 'reason': 'No matching camera timestamps',
+        'background': 'recorded RGB; only LiDAR is synthetic', 'calibration_convention': 'Explicit calibration',
+        'limitations': 'No motion compensation', 'frames': [{'frame': 0, 'lidar_frame': 0,
+            'camera_frame': 2, 'skew_ms': 1., 'real': {'file': 'real_frame_000.png'},
+            'synthetic': [{'file': 'sample_000_frame_000.png', 'sample': 'sample_000.npz'}]}]}
+
+    def request(method, url, **kwargs):
+        path = url.removeprefix('http://127.0.0.2:9000')
+        if path == '/jobs':
+            value = [state]
+        elif path == f'/jobs/{job_id}':
+            value = state
+        elif path == f'/jobs/{job_id}/result':
+            value = {'action': 'generate', 'samples': 1, 'camera_overlays': overlays}
+        elif '/overlays/' in path:
+            fetched.append(path.rsplit('/', 1)[-1])
+            return httpx.Response(200, content=image.getvalue(), headers={'content-type': 'image/png'},
+                                  request=httpx.Request(method, url))
+        else:
+            return original(method, url, **kwargs)
+        return httpx.Response(200, json=value, request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx, 'request', request)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    assert not app.exception
+    if status == 'completed':
+        assert fetched == ['real_frame_000.png', 'sample_000_frame_000.png']
+        assert any('recorded RGB' in value.value for value in app.caption)
+        app.run()
+        assert not app.exception and len(fetched) == 2
+    else:
+        assert not fetched
+        assert any('No matching camera timestamps' in value.value for value in app.info)
 
 
 def test_generation_edits_persist_and_reset_restores_all_training_defaults(latest_training_remote):

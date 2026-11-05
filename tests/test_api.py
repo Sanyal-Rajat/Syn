@@ -32,7 +32,7 @@ def test_api_resolves_all_gpus_and_rejects_unavailable_counts(prepared, tmp_path
         assert response.status_code == 422 and '4 are visible' in response.text
 
 
-def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
+def test_remote_training_and_artifacts(prepared, camera_inputs, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(server, 'ROOT', tmp_path / 'runs')
     with TestClient(server.app) as client:
         assert client.get('/health').status_code == 200
@@ -82,6 +82,7 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert pdf.content.startswith(b'%PDF-')
         assert 'LICENSES/MODEL-MIT.txt' in archive.namelist()
         generation = client.post('/jobs', json={'action': 'generate', **latest['defaults'],
+            'camera_calibration': str(camera_inputs[1]),
             'checkpoint': str(Path(report['checkpoint']).parent)})
         assert generation.status_code == 202, generation.text
         generation_id = generation.json()['id']
@@ -97,6 +98,18 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert generated['calibration_profile'] == report['selected_profile_on_validation']
         assert generated['conditioning_source']['path'] == latest['defaults']['conditioning']
         assert generated['geometry']['new_surface_returns'] == 0
+        overlays = generated['camera_overlays']
+        assert overlays['status'] == 'completed', overlays
+        assert [row['camera_frame'] for row in overlays['frames']] == [2, 3]
+        image_name = overlays['frames'][0]['synthetic'][0]['file']
+        preview = client.get(f'/jobs/{generation_id}/overlays/{image_name}')
+        assert preview.status_code == 200 and preview.headers['content-type'] == 'image/png'
+        assert preview.content.startswith(b'\x89PNG')
+        assert client.get(f'/jobs/{generation_id}/overlays/request.json').status_code == 404
+        secret = tmp_path / 'outside.png'
+        secret.write_bytes(b'outside job')
+        (server.ROOT / generation_id / 'overlays/outside.png').symlink_to(secret)
+        assert client.get(f'/jobs/{generation_id}/overlays/outside.png').status_code == 404
         reference_path = generated['real_scene']
         assert Path(reference_path).name == 'real_scene.npz'
         with np.load(reference_path, allow_pickle=False) as real, np.load(server.ROOT / generation_id / 'sample_000.npz') as synthetic:
@@ -106,6 +119,9 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
             assert (abs(synthetic['range'][valid] - real['range'][valid]) <= .10001).all()
         archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{generation_id}/artifacts').content))
         assert {'real_scene.npz', 'sample_000.npz', 'result.json', 'result.pdf'} <= set(archive.namelist())
+        assert f'overlays/{image_name}' in archive.namelist()
+        assert 'overlays/calibration.json' in archive.namelist()
+        assert 'overlays/outside.png' not in archive.namelist()
         assert client.get(f'/jobs/{generation_id}/report').content.startswith(b'%PDF-')
         for scene in ('', reference_path):
             response = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
