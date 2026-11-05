@@ -5,9 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .camera import load_camera, project_points
 from .data.scan_to_range import unproject
-from .eval.spatial_gap import covariates, distribution_gap, overlay_rgb_gap, pixel_gap, voxel_gap
+from .eval.spatial_gap import covariates, distribution_gap, voxel_gap
 from .io import write_json
 from .logs import get_logger
 
@@ -65,7 +64,7 @@ def frame_cloud(scene, frame):
 
 def analyze(directory, report, voxel_size):
     """Compute all metrics on the compute machine and persist full-resolution maps."""
-    from PIL import Image
+    from .pixel_graphs import VERSION, analyze_pixels
 
     directory = Path(directory).resolve()
     scenes = {name: load_arrays(directory / filename) for name, filename in {'real': 'real_scene.npz', **ARMS}.items()}
@@ -78,7 +77,9 @@ def analyze(directory, report, voxel_size):
                 or not np.allclose(scene['elevations'], reference['elevations'], atol=1e-7, rtol=0)):
             raise ValueError('Comparison scenes must share temporal, range-image and calibrated beam grids')
     overlays = report.get('camera_overlays', {})
-    camera = load_camera(directory / 'overlays/calibration.json') if overlays.get('status') == 'completed' else None
+    if report.get('pixel_analysis', {}).get('version') != VERSION:
+        report['pixel_analysis'] = analyze_pixels(directory, report)
+    pixel_frames = report['pixel_analysis']['frames']
     folder = directory / 'comparison'
     folder.mkdir(exist_ok=True)
     frames = []
@@ -87,47 +88,31 @@ def analyze(directory, report, voxel_size):
         for name, scene in scenes.items():
             clouds[name], intensity = frame_cloud(scene, frame)
             features[name] = covariates(clouds[name], intensity, float(reference['max_range_m']))
-        row = next((row for row in overlays.get('frames', []) if row['frame'] == frame), None)
-        images, depths, rgb = {}, {}, {}
-        if camera is not None and row is not None:
-            with Image.open(directory / 'overlays' / row['camera']) as image:
-                size = image.size
-            images['camera'] = 'overlays/' + row['camera']
-            for name in scenes:
-                entry = row['real'] if name == 'real' else next(value for value in row['synthetic'] if value['sample'] == ARMS[name])
-                filename = 'overlays/' + entry['file']
-                with Image.open(directory / filename) as image:
-                    rgb[name] = np.asarray(image.convert('RGB'))
-                images[name] = filename
-                pixels, distances, _ = project_points(clouds[name], camera, size)
-                depth = np.full((size[1], size[0]), np.nan, dtype='float32')
-                depth[pixels[:, 1], pixels[:, 0]] = distances
-                depths[name] = depth
-        metrics, maps = {}, {}
+        pixel_row = next(row for row in pixel_frames if row['frame'] == frame)
+        with np.load(directory / pixel_row['maps'], allow_pickle=False) as source:
+            maps = {key: source[key].copy() for key in source.files}
+        metrics = {}
         for key, (a, b) in PAIRS.items():
             spatial, centers, density = voxel_gap(clouds[a], clouds[b], voxel_size)
-            values = {'voxel': spatial, 'pixel': None, 'overlay_rgb': None, 'covariates': {}}
+            pixels = pixel_row['pairs'][key]
+            values = {'voxel': spatial, 'pixel': pixels['camera_pixel'], 'overlay_rgb': pixels['overlay_rgb'],
+                      'range_pixel': pixels['range_pixel'], 'covariates': {}}
             maps[key + '_voxel_centers'] = centers.astype('float32')
             maps[key + '_voxel_density_difference'] = density.astype('float32')
             for feature in features[a].keys() & features[b].keys():
                 values['covariates'][feature] = distribution_gap(features[a][feature]['counts'], features[b][feature]['counts'])
-            if depths:
-                values['pixel'], error, occupancy = pixel_gap(depths[a], depths[b])
-                maps[key + '_pixel_depth_error'] = error
-                maps[key + '_pixel_occupancy_difference'] = occupancy
-                values['overlay_rgb'], rgb_error = overlay_rgb_gap(rgb[a], rgb[b], depths[a], depths[b])
-                maps[key + '_pixel_rgb_error'] = rgb_error
             metrics[key] = values
         name = f'comparison/maps_{frame:03d}.npz'
         np.savez_compressed(directory / name, **maps)
-        frames.append({'frame': frame, 'pairs': metrics, 'covariates': features, 'maps': name, 'images': images,
-                       'camera_skew_ms': row.get('skew_ms') if row else None})
+        frames.append({'frame': frame, 'pairs': metrics, 'covariates': features, 'maps': name, 'images': pixel_row['images'],
+                       'camera_skew_ms': pixel_row['camera_skew_ms']})
         get_logger().info('Computed full-resolution pixel/voxel gaps for frame %d', frame)
     result = {**report['comparison'], 'voxel_size_m': voxel_size, 'frames': frames,
         'status': 'completed' if all(frame['images'] for frame in frames) else 'pointcloud_only',
-        'camera_diagnostic': overlays.get('reason'),
+        'camera_diagnostic': next((row['camera_reason'] for row in pixel_frames if row['camera_reason']), None),
         'calibration_convention': overlays.get('calibration_convention'),
         'definitions': {'js_distance': 'Square root of Jensen-Shannon divergence, log base 2; range 0..1.',
+            'range_pixel': 'LiDAR beam/azimuth grid; radial range in metres, independent of camera availability.',
             'chamfer_mean_m': 'Mean of the two directed mean Euclidean nearest-neighbour distances; unsquared metres.',
             'voxel': 'Sparse occupancy/count distribution on a shared sensor-frame grid with origin (0,0,0).',
             'pixel': 'Camera-plane optical depth on shared calibrated pixels; missing returns are never filled.',

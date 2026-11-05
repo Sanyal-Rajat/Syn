@@ -137,6 +137,32 @@ def camera_section(path, frame, overlay_dir=None):
             f'<p>{escape(message)}</p></section>'), protected
 
 
+def pixel_section(path, frame):
+    """Embed the job's portable pixel graphs beside the selected NPZ viewer."""
+    directory = Path(path).parent.resolve()
+    metadata = directory / 'pixel_graphs.json'
+    protected = {metadata}
+    if metadata.is_file():
+        report = json.loads(metadata.read_text())
+        row = next((row for row in report.get('frames', []) if row['frame'] == frame), None)
+        if row:
+            figures = []
+            for graph in row['graphs']:
+                image = (directory / graph['file']).resolve()
+                if image.suffix != '.png' or not image.is_relative_to(directory / 'pixel_graphs'):
+                    raise ValueError('Pixel graph images must be PNGs in the job pixel_graphs folder')
+                if not image.is_file():
+                    continue
+                protected.add(image)
+                data = base64.b64encode(image.read_bytes()).decode('ascii')
+                figures.append(f'<figure><figcaption>{escape(graph["label"])}</figcaption><img src="data:image/png;base64,{data}"></figure>')
+            if figures:
+                return '<section><h2>Pixel domain-gap graphs</h2><p>All saved sample pairs for this temporal frame. Camera pixels and LiDAR beam/azimuth pixels are labelled separately.</p>' + ''.join(figures) + '</section>', protected
+    return ('<section class="notice"><h2>Pixel graphs not generated</h2>'
+            '<p>Build / refresh pixel graphs in the UI, or run <code>python -m lidarpoc.pixel_graphs --job /path/to/extracted/job</code>, '
+            'then keep pixel_graphs.json and pixel_graphs/ beside the NPZ files.</p></section>'), protected
+
+
 def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_radius=30, overlay_dir=None):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -153,6 +179,8 @@ def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_
     if not len(points):
         raise ValueError('Selected frame has no valid LiDAR returns')
     camera_html, image_inputs = camera_section(path, frame, overlay_dir)
+    pixel_html, pixel_inputs = pixel_section(path, frame)
+    image_inputs.update(pixel_inputs)
     if output.resolve() in {source.resolve() for source in image_inputs}:
         raise ValueError('HTML output must not overwrite a camera input file')
     extents = list(dict.fromkeys((view_radius, 10, 30, 60, 0)))
@@ -213,7 +241,7 @@ def visualize(path, frame=0, output=None, manifest=None, max_points=30000, view_
         '.camera-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}'
         'figure{margin:0}figcaption{padding:8px 0}img{display:block;width:100%;height:auto}'
         '.notice{margin:16px;background:#292519;border-left:4px solid #d6a850}'
-        f'</style></head><body><main>{camera_html}{plot}</main></body></html>', encoding='utf-8')
+        f'</style></head><body><main>{camera_html}{plot}{pixel_html}</main></body></html>', encoding='utf-8')
     print('Open in your browser:', output.resolve())
     return output
 

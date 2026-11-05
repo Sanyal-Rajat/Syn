@@ -106,6 +106,8 @@ if __name__ == '__main__':
     report = json.loads(path.read_text())
     report['camera_overlays'] = export_overlays(config, load_manifest(config.manifest), args.job,
         report.get('real_scene'), lambda *values: progress(args.job, *values))
+    from .pixel_graphs import analyze_pixels
+    report['pixel_analysis'] = analyze_pixels(args.job, report)
     if report.get('comparison'):
         from .comparison import analyze
         report['comparison'] = analyze(args.job, report, config.comparison_voxel_m)

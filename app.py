@@ -479,6 +479,15 @@ def monitor():
         if cache not in st.session_state:
             st.session_state[cache] = api('GET', f'/jobs/{job_id}/result', timeout=60).json()
         report = st.session_state[cache]
+        if report['action'] == 'generate':
+            if st.button('Build / refresh pixel graphs', key=f'pixel_rebuild:{job_id}',
+                         help='Analyze the saved NPZs and camera overlays, without retraining or generation.'):
+                with st.spinner('Building pixel graphs from saved data on the server...'):
+                    report = api('POST', f'/jobs/{job_id}/pixel-graphs/rebuild', timeout=180).json()
+                st.session_state[cache] = report
+                for key in list(st.session_state):
+                    if key.startswith(f'pixel:{cache}:') or key in (f'pixel_zip:{cache}', f'export:{cache}', f'pdf:{cache}'):
+                        del st.session_state[key]
         if report['action'] == 'prepare':
             st.write('Prepared manifest on the remote server:')
             st.code(report['manifest'])
@@ -486,6 +495,44 @@ def monitor():
         elif report['action'] == 'generate':
             st.success(f"Generated {report['samples']} LiDAR windows.")
             comparison = report.get('comparison')
+            pixels = report.get('pixel_analysis', {})
+            st.subheader('Pixel domain-gap graphs')
+            if pixels.get('frames'):
+                st.caption('LiDAR range-grid pixels and camera pixels are separate measurements. Blank map pixels have no valid support; metrics use full resolution.')
+                pixel_row = st.selectbox('Pixel graph frame', pixels['frames'],
+                    format_func=lambda row: f"Frame {row['frame']}", key=f'pixel_frame:{job_id}')
+                errors = pd.DataFrame([{'pair': name, 'LiDAR radial range MAE (m)': values['range_pixel']['depth_mae_m'],
+                    'Camera optical-depth MAE (m)': (values['camera_pixel'] or {}).get('depth_mae_m')}
+                    for name, values in pixel_row['pairs'].items()]).set_index('pair')
+                occupancy = pd.DataFrame([{'pair': name, 'LiDAR range-grid IoU': values['range_pixel']['occupancy_iou'],
+                    'Camera pixel IoU': (values['camera_pixel'] or {}).get('occupancy_iou')}
+                    for name, values in pixel_row['pairs'].items()]).set_index('pair')
+                left, right = st.columns(2)
+                left.caption('Pixel depth errors (metres; lower is better)')
+                if errors.dropna(axis=1, how='all').empty:
+                    left.info('No shared valid pixels for depth errors.')
+                else:
+                    left.bar_chart(errors.dropna(axis=1, how='all'))
+                right.caption('Pixel occupancy IoU (higher is better)')
+                if occupancy.dropna(axis=1, how='all').empty:
+                    right.info('No occupied pixels for an occupancy comparison.')
+                else:
+                    right.bar_chart(occupancy.dropna(axis=1, how='all'))
+                if pixel_row.get('camera_reason'):
+                    st.info('Camera pixel graphs unavailable: ' + pixel_row['camera_reason'] + '. LiDAR range-grid graphs are shown below.')
+                for graph in pixel_row['graphs']:
+                    key = f'pixel:{cache}:{graph["file"]}'
+                    if key not in st.session_state:
+                        st.session_state[key] = api('GET', f'/jobs/{job_id}/pixel-graphs/{Path(graph["file"]).name}', timeout=60).content
+                    st.image(st.session_state[key], caption=graph['label'])
+                st.link_button('Open interactive pixel graphs', f'{endpoint}/jobs/{job_id}/pixel-graphs')
+                if st.button('Prepare pixel graphs download', key=f'pixel_download:{job_id}'):
+                    st.session_state[f'pixel_zip:{cache}'] = api('GET', f'/jobs/{job_id}/pixel-graphs.zip', timeout=180).content
+                if f'pixel_zip:{cache}' in st.session_state:
+                    st.download_button('Download pixel PNGs, HTML, CSV and maps', st.session_state[f'pixel_zip:{cache}'],
+                        'pixel_graphs.zip', 'application/zip', key=f'pixel_zip_button:{job_id}')
+            else:
+                st.info(pixels.get('reason', 'This older run has no pixel graphs yet. Click Build / refresh pixel graphs above; no retraining is needed.'))
             if comparison:
                 st.subheader('Without training / with training')
                 st.caption('Same conditioning scene and sampling seed. Overlays share a recorded RGB photo. Geometry is constrained by the conditioning rules.')

@@ -497,8 +497,10 @@ with one GPU or CPU, they run sequentially. Two samples do not provide independe
 generation work for more than two GPUs. Analysis and HTML rendering run on the
 compute machine; the client receives the finished viewer through the SSH tunnel.
 
-Under **Monitor and results**, click **Open side-by-side images, point clouds and
-gap graphs**. The viewer has synchronized 3D cameras, nearby/full-scene extents,
+Under **Monitor and results**, pixel-error bars, occupancy bars, pixel maps and
+error-distribution graphs are displayed directly. Select **Pixel graph frame**
+to change the temporal frame. Click **Open side-by-side images, point clouds and
+gap graphs** for the combined viewer. It has synchronized 3D cameras, nearby/full-scene extents,
 and a temporal-frame selector. Download the artifact ZIP to open the self-contained
 `comparison.html` offline, without access to the dataset or an internet connection.
 The two image panels are LiDAR overlays on the **same recorded camera photo**;
@@ -509,6 +511,8 @@ All three pairs are reported: untrained versus real, trained versus real, and
 trained versus untrained. The graphs and machine-readable scores include:
 
 - Camera-pixel optical-depth MAE/RMSE/p95, return occupancy IoU and disagreement.
+- LiDAR beam/azimuth-grid radial-range errors and return-mask differences, available
+  even when timestamp-matched camera data is missing. These are not RGB-camera pixels.
 - Per-pixel overlay RGB MAE maps and foreground RGB errors/histogram discrepancies.
   The common photographic background and label strip are excluded from foreground
   scoring. These values measure overlay differences, not synthetic RGB quality.
@@ -532,11 +536,37 @@ both arms, so a low geometry error alone does not prove successful learning.
 The job stores `comparison.json`, full-resolution `comparison/maps_*.npz`,
 `comparison.html`, `real_scene.npz`, both synthetic NPZs, and matching
 `overlays/sample_000_frame_*.png` / `sample_001_frame_*.png`. The results PDF includes
-the paired metrics and their limits. Install the updated `requirements-server.txt`
+the paired metrics, pixel PNG graphs and their limits. Install the updated `requirements-server.txt`
 for server-side Plotly rendering. Camera provenance, timestamps and calibration
 requirements are the same as for ordinary Generate. If camera matching fails,
-point-cloud/voxel results and the viewer are retained, while the missing images and
-pixel scores are explicitly reported as unavailable.
+point-cloud/voxel results, LiDAR range-grid pixel graphs and the viewer are retained.
+Missing camera images and camera-pixel scores are explicitly reported as unavailable.
+
+**Pixel graphs for every conditioned Generate job.** Both ordinary Generate and
+untrained/trained comparison export `pixel_graphs.html`, `pixel_graphs.json`,
+`pixel_graphs/metrics.csv`, full-resolution `pixel_graphs/maps_*.npz`, and portable
+PNG map/distribution graphs for every frame. No browser or additional image-export
+dependency is needed to create the PNGs. The artifact ZIP includes all these files.
+Use **Prepare pixel graphs download**, then **Download pixel PNGs, HTML, CSV and maps**
+for a smaller ZIP without model checkpoints. Open `pixel_graphs.html` offline for
+interactive plots, or open the PNGs directly. The single-NPZ viewer embeds these
+PNG graphs when `pixel_graphs.json` and `pixel_graphs/` are beside the NPZ files.
+
+For an existing run, update/restart the client and API and click **Build / refresh
+pixel graphs**. This reads the saved NPZ and camera overlay files; it does not train
+or sample a model. The UI refreshes its cached JSON, PNG, PDF and ZIP data afterward.
+Artifact downloads also backfill missing graphs for older completed Generate jobs.
+To build the same outputs from an extracted download, run:
+
+```bash
+python -m lidarpoc.pixel_graphs --job /path/to/extracted/job
+```
+
+Ordinary generation compares each saved sample against `real_scene.npz`; it never
+labels two ordinary samples as untrained/trained. Camera maps require the saved
+`overlays/calibration.json`, camera records and matching overlay PNGs. If these are
+unavailable, range-grid graphs remain visible and the camera diagnostic is shown.
+Unconditional jobs without a real reference report why pixel gaps cannot be computed.
 
 For API/CLI requests, keep `action: "generate"`, supply the manifest and trained
 checkpoint, and add `"compare_training": true`, `"auto_conditioning": true`,
@@ -744,6 +774,10 @@ All API paths below are relative to `http://127.0.0.2:9000` on the client:
 | GET | `/jobs/{job_id}/result` | Completed result JSON |
 | GET | `/jobs/{job_id}/report` | Completed PDF report; also generates one for older JSON-only results |
 | GET | `/jobs/{job_id}/comparison` | Offline HTML viewer for a completed untrained/trained comparison |
+| POST | `/jobs/{job_id}/pixel-graphs/rebuild` | Rebuild pixel graphs/CSV/maps/PDF from a completed Generate job and return refreshed results |
+| GET | `/jobs/{job_id}/pixel-graphs` | Interactive pixel viewer; backfill missing graphs from saved data |
+| GET | `/jobs/{job_id}/pixel-graphs/{filename}` | A generated PNG pixel graph |
+| GET | `/jobs/{job_id}/pixel-graphs.zip` | Pixel PNGs, offline HTML, metrics CSV/JSON and full-resolution maps |
 | GET | `/jobs/{job_id}/artifacts` | Completed artifact ZIP |
 
 ## PDF results reports
@@ -820,6 +854,9 @@ of Torch, the model stack and SSH.
 provides independent pixel, voxel and covariate metrics. `comparison_viewer.py`
 renders the offline viewer without model imports. `view_comparison.py` rebuilds
 the analysis from an existing paired job; it never trains or samples a model.
+`pixel_graphs.py` shares pixel analysis and graph rendering between regular and paired
+generation, the UI, offline viewers and downloads. It can backfill old saved runs
+without loading model weights; PNG rendering uses the existing Pillow dependency.
 
 GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 `PINNs/gpu_optimizer.py` and `PINNs/sandbox_optimizer_lib.py`. The tunnel adapts

@@ -16,6 +16,8 @@ if __name__ == '__main__':
     report = json.loads(path.read_text())
     if not report.get('comparison'):
         parser.error('Select paired untrained/trained generation first; two arbitrary trained samples are not a training comparison')
+    from lidarpoc.pixel_graphs import analyze_pixels
+    report['pixel_analysis'] = analyze_pixels(args.job, report)
     report['comparison'] = analyze(args.job, report, args.voxel_size)
     write_json(path, report)
     from lidarpoc.report import write_pdf

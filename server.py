@@ -237,12 +237,15 @@ def report(job_id: str):
     state = json.loads((directory / 'state.json').read_text())
     if state['status'] != 'completed':
         raise HTTPException(409, 'Complete the job before exporting its PDF report')
+    if json.loads((directory / 'result.json').read_text()).get('action') == 'generate':
+        ensure_pixel_graphs(directory)
     return FileResponse(pdf_report(directory), media_type='application/pdf', filename='result.pdf')
 
 
 @app.get('/jobs/{job_id}/comparison')
 def comparison_viewer(job_id: str):
     directory = job_dir(job_id)
+    ensure_pixel_graphs(directory)
     state = json.loads((directory / 'state.json').read_text())
     path = directory / 'comparison.html'
     if state['status'] != 'completed' or not path.is_file():
@@ -250,17 +253,83 @@ def comparison_viewer(job_id: str):
     return FileResponse(path, media_type='text/html')
 
 
+def ensure_pixel_graphs(directory, force=False):
+    """Backfill completed Generate jobs when requested; no model execution."""
+    from lidarpoc.pixel_graphs import VERSION, rebuild
+    with LOCK:
+        state = json.loads((directory / 'state.json').read_text())
+        if state['status'] != 'completed':
+            raise HTTPException(409, 'Complete the job before exporting pixel graphs')
+        report = json.loads((directory / 'result.json').read_text())
+        if report.get('action') != 'generate':
+            raise HTTPException(409, 'Pixel graphs require a Generate job')
+        pixels = report.get('pixel_analysis', {})
+        files = [directory / 'pixel_graphs.html', directory / 'pixel_graphs/metrics.csv',
+                 directory / 'pixel_graphs.json',
+                 *(directory / row['maps'] for row in pixels.get('frames', [])),
+                 *(directory / graph['file'] for row in pixels.get('frames', []) for graph in row.get('graphs', []))]
+        if force or pixels.get('version') != VERSION or not all(path.is_file() for path in files):
+            try:
+                report = rebuild(directory)
+            except (OSError, ValueError, KeyError) as error:
+                raise HTTPException(422, f'Cannot build pixel graphs: {error}') from error
+        return report
+
+
+@app.post('/jobs/{job_id}/pixel-graphs/rebuild')
+def rebuild_pixel_graphs(job_id: str):
+    return ensure_pixel_graphs(job_dir(job_id), force=True)
+
+
+@app.get('/jobs/{job_id}/pixel-graphs')
+def pixel_viewer(job_id: str):
+    directory = job_dir(job_id)
+    report = ensure_pixel_graphs(directory)
+    path = directory / 'pixel_graphs.html'
+    if not report['pixel_analysis'].get('frames') or not path.is_file():
+        raise HTTPException(409, report['pixel_analysis'].get('reason', 'Pixel graphs are unavailable'))
+    return FileResponse(path, media_type='text/html')
+
+
+@app.get('/jobs/{job_id}/pixel-graphs.zip')
+def pixel_download(job_id: str):
+    directory = job_dir(job_id)
+    report = ensure_pixel_graphs(directory)
+    if not report['pixel_analysis'].get('frames'):
+        raise HTTPException(409, report['pixel_analysis'].get('reason', 'Pixel graphs are unavailable'))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
+        for file in [directory / 'result.json', directory / 'pixel_graphs.json', directory / 'pixel_graphs.html',
+                     *(directory / 'pixel_graphs').iterdir()]:
+            if file.is_file() and file.resolve().is_relative_to(directory.resolve()):
+                archive.write(file, str(file.relative_to(directory)))
+    return Response(buffer.getvalue(), media_type='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="pixel-graphs-{job_id}.zip"'})
+
+
+@app.get('/jobs/{job_id}/pixel-graphs/{filename}')
+def pixel_image(job_id: str, filename: str):
+    folder = job_dir(job_id) / 'pixel_graphs'
+    path = (folder / filename).resolve()
+    if path.parent != folder.resolve() or path.suffix != '.png' or not path.is_file():
+        raise HTTPException(404, 'Unknown pixel graph')
+    return FileResponse(path, media_type='image/png')
+
+
 @app.get('/jobs/{job_id}/artifacts')
 def artifacts(job_id: str):
     path = job_dir(job_id)
     if not (path / 'result.json').is_file():
         raise HTTPException(409, 'Complete the job before exporting artifacts')
+    if json.loads((path / 'result.json').read_text()).get('action') == 'generate':
+        ensure_pixel_graphs(path)
     pdf_report(path)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
         for filename in ('request.json', 'result.json', 'result.pdf', 'dependency-lock.json', 'profiles.json', 'training.json', 'real_scene.npz',
                          'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz',
-                         'resources.json', 'batch_backoff.json', 'comparison.json', 'comparison.html'):
+                         'resources.json', 'batch_backoff.json', 'comparison.json', 'comparison.html',
+                         'pixel_graphs.json', 'pixel_graphs.html'):
             if (path / filename).is_file():
                 archive.write(path / filename, filename)
         for pattern in ('*.pt', 'sample_*.npz'):
@@ -269,7 +338,7 @@ def artifacts(job_id: str):
         for file in (Path(__file__).parent / 'LICENSES').iterdir():
             if file.is_file():
                 archive.write(file, f'LICENSES/{file.name}')
-        for folder in ('experiments', 'scenes', 'overlays', 'comparison'):
+        for folder in ('experiments', 'scenes', 'overlays', 'comparison', 'pixel_graphs'):
             for file in (path / folder).rglob('*'):
                 if file.is_file() and file.resolve().is_relative_to(path.resolve()):
                     archive.write(file, str(file.relative_to(path)))

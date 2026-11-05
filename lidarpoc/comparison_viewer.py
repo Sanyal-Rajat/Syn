@@ -1,11 +1,13 @@
 """Offline, side-by-side comparison viewer; reads metrics computed on the server."""
 import base64
 from html import escape
+import json
 from pathlib import Path
 
 import numpy as np
 
 from .comparison import ARMS, PAIRS, frame_cloud, load_arrays
+from .pixel_graphs import pixel_figures
 
 LABELS = {'untrained': 'Without training', 'trained': 'With training', 'real': 'Recorded LiDAR'}
 
@@ -21,17 +23,6 @@ def image_html(directory, filename, label):
     return f'<figure><figcaption>{escape(label)}</figcaption><img src="data:image/{kind};base64,{data}" alt="{escape(label)}"></figure>'
 
 
-def display_map(values):
-    """Largest absolute difference per display block; metrics stay full resolution."""
-    step = max(1, int(np.ceil(values.shape[1] / 320)))
-    height, width = (int(np.ceil(size / step)) for size in values.shape)
-    padded = np.full((height * step, width * step), np.nan)
-    padded[:values.shape[0], :values.shape[1]] = values
-    blocks = padded.reshape(height, step, width, step).transpose(0, 2, 1, 3).reshape(height, width, -1)
-    largest = np.where(np.isfinite(blocks), abs(blocks), -np.inf).argmax(axis=-1)
-    return np.take_along_axis(blocks, largest[..., None], axis=-1)[..., 0]
-
-
 def write_viewer(directory, report):
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -39,6 +30,7 @@ def write_viewer(directory, report):
     directory = Path(directory).resolve()
     scenes = {name: load_arrays(directory / filename) for name, filename in {'real': 'real_scene.npz', **ARMS}.items()}
     sections, first = [], True
+    pixels = json.loads((directory / 'pixel_graphs.json').read_text())
 
     def chart(figure, identity, height):
         nonlocal first
@@ -109,26 +101,6 @@ def write_viewer(directory, report):
         content.append(''.join(table) + '</tbody></table>')
 
         with np.load(directory / row['maps'], allow_pickle=False) as maps:
-            if images:
-                figure = make_subplots(rows=3, cols=3, subplot_titles=tuple(pair_labels) * 3)
-                maximum = max((float(np.nanmax(maps[key + '_pixel_depth_error']))
-                               for key in PAIRS if np.isfinite(maps[key + '_pixel_depth_error']).any()), default=1)
-                for column, key in enumerate(PAIRS, 1):
-                    figure.add_trace(go.Heatmap(z=display_map(maps[key + '_pixel_depth_error']), zmin=0,
-                        zmax=max(maximum, .001), colorscale='Magma', showscale=column == 3,
-                        hovertemplate='Display block maximum error: %{z:.4f}m<extra></extra>'), row=1, col=column)
-                    figure.add_trace(go.Heatmap(z=display_map(maps[key + '_pixel_rgb_error']), zmin=0, zmax=1,
-                        colorscale='Magma', showscale=False,
-                        hovertemplate='Overlay RGB MAE (0–1): %{z:.4f}<extra></extra>'), row=2, col=column)
-                    figure.add_trace(go.Heatmap(z=display_map(maps[key + '_pixel_occupancy_difference']), zmin=-1, zmax=1,
-                        colorscale=[[0, '#f97316'], [.5, '#334155'], [1, '#38bdf8']], showscale=False,
-                        hovertemplate='Occupancy B−A: %{z}<extra></extra>'), row=3, col=column)
-                figure.update_yaxes(autorange='reversed', title_text='Camera pixel blocks')
-                content.extend(['<h2>Camera pixel maps: depth error / RGB overlay error / occupancy</h2>'
-                    '<p>Rows: optical-depth MAE in metres; RGB MAE (0–1) within overlay foreground; '
-                    'occupancy B minus A (orange: A only, blue: B only). Missing support is blank. '
-                    'Each display block retains its largest absolute difference; all metrics use full resolution.</p>',
-                                chart(figure, f'pixels_{frame}', 940)])
             figure = make_subplots(rows=1, cols=3, specs=[[{'type': 'scene'}] * 3], subplot_titles=tuple(pair_labels))
             scale = max((float(abs(maps[key + '_voxel_density_difference']).max())
                          for key in PAIRS if len(maps[key + '_voxel_density_difference'])), default=1)
@@ -144,6 +116,13 @@ def write_viewer(directory, report):
                     hovertemplate='Voxel center: %{x:.2f}, %{y:.2f}, %{z:.2f}m<extra></extra>'), row=1, col=column)
             figure.update_layout(scene=scene, scene2=scene, scene3=scene, showlegend=False)
             content.extend(['<h2>Per-voxel density differences (B minus A)</h2>', chart(figure, f'voxels_{frame}', 430)])
+
+        pixel_row = next(value for value in pixels['frames'] if value['frame'] == frame)
+        if pixel_row['camera_reason']:
+            content.append('<p>Camera pixels unavailable: ' + escape(pixel_row['camera_reason']) + '. LiDAR range-grid graphs are available below.</p>')
+        with np.load(directory / pixel_row['maps'], allow_pickle=False) as maps:
+            for index, (title, figure) in enumerate(pixel_figures(pixel_row, maps)):
+                content.extend(['<h2>' + escape(title) + '</h2>', chart(figure, f'pixels_{frame}_{index}', figure.layout.height)])
 
         feature_names = ['range_m', 'height_m', 'intensity']
         figure = make_subplots(rows=1, cols=3, subplot_titles=tuple(feature_names))

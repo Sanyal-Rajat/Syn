@@ -196,6 +196,10 @@ def _run(config, directory):
                 'checkpoint_epoch': int(checkpoint['epoch']), 'trained_checkpoint': str(checkpoint_path),
                 'baseline': 'Fresh random initialization of the same architecture; no checkpoint weights loaded. Not the historical pre-training weights.',
             }
+        from .pixel_graphs import analyze_pixels
+        progress('exporting pixel graphs, full-resolution maps and CSV metrics')
+        report['pixel_analysis'] = analyze_pixels(directory, report)
+        if config.compare_training:
             progress('computing pixel and voxel domain gaps; building comparison viewer')
             report['comparison'] = analyze(directory, report, config.comparison_voxel_m)
         write_json(directory / 'result.json', report)

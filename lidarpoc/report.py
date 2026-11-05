@@ -170,7 +170,8 @@ def write_pdf(result_path, output=None):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.lib.utils import ImageReader
+    from reportlab.platypus import Image as ReportImage, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     result_path = Path(result_path)
     source = result_path.read_bytes()
@@ -303,6 +304,28 @@ def write_pdf(result_path, output=None):
         table(['Split', 'Trace', 'Frames', 'Source frames'],
               [[row.get(key) for key in ('split', 'sequence_id', 'frames', 'source_frames')] for row in report.get('inventory', [])],
               [60, width - 180, 60, 60])
+    pixels = report.get('pixel_analysis', {})
+    if pixels.get('frames'):
+        section('Pixel domain gaps')
+        for description in pixels['definitions'].values():
+            story.append(paragraph(description))
+        for frame in pixels['frames']:
+            section(f"Pixel graphs - frame {frame['frame']}")
+            if frame.get('camera_reason'):
+                story.append(paragraph('Camera pixels unavailable: ' + frame['camera_reason']))
+            table(['Pair', 'Range MAE (m)', 'Range IoU', 'Camera MAE (m)', 'Camera IoU'],
+                  [[name, value['range_pixel']['depth_mae_m'], value['range_pixel']['occupancy_iou'],
+                    (value['camera_pixel'] or {}).get('depth_mae_m'), (value['camera_pixel'] or {}).get('occupancy_iou')]
+                   for name, value in frame['pairs'].items()], [145, 90, 75, 110, width - 420])
+            for graph in frame['graphs']:
+                path = (result_path.parent / graph['file']).resolve()
+                if path.suffix != '.png' or not path.is_relative_to((result_path.parent / 'pixel_graphs').resolve()):
+                    raise ValueError('Pixel report graphs must be PNGs inside the job pixel_graphs directory')
+                if path.is_file():
+                    story.append(paragraph(graph['label']))
+                    image_width, image_height = ImageReader(str(path)).getSize()
+                    scale = min(width / image_width, (A4[1] - 180) / image_height)
+                    story.append(ReportImage(str(path), width=image_width * scale, height=image_height * scale))
     if report.get('comparison'):
         section('Untrained / trained diffusion comparison')
         comparison = report['comparison']
