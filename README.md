@@ -322,6 +322,19 @@ python view_syn_npz.py real_scene.npz --frame 0 --output real_scene.html
 python view_syn_npz.py sample_000.npz --frame 0 --output synthetic_scene.html
 ```
 
+The viewer opens a nearby scene view (±30 m in X/Y) with the plotting grid
+hidden. Use the extent dropdown for **Full scene**, the camera dropdown for top
+or axis views, and **Toggle axes / grid** for coordinates. Long-range returns can
+otherwise make nearby structures appear tiny. These controls change only the
+display; the NPZ and range/intensity images retain their data. To start with all
+extents visible, add `--view-radius 0`. Regenerate previously exported HTML files
+with the updated viewer to get these controls.
+
+LiDAR scan rings and gaps between returns remain visible, especially at longer
+ranges. The viewer displays measured/generated points rather than RGB images or
+textured surfaces. Compare the same frame in `real_scene.npz` and `sample_000.npz`
+to distinguish acquisition sparsity from geometry or returns lost by generation.
+
 This automation supplies conditioning geometry; it does not establish that the
 diffusion model has learned realistic scenes. The existing surface-deviation and
 ray-mask constraints still apply.
