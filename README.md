@@ -553,7 +553,7 @@ interactive plots, or open the PNGs directly. The single-NPZ viewer embeds these
 PNG graphs when `pixel_graphs.json` and `pixel_graphs/` are beside the NPZ files.
 
 For an existing run, update/restart the client and API and click **Build / refresh
-pixel graphs**. This reads the saved NPZ and camera overlay files; it does not train
+pixel and OT graphs**. This reads the saved NPZ and camera overlay files; it does not train
 or sample a model. The UI refreshes its cached JSON, PNG, PDF and ZIP data afterward.
 Artifact downloads also backfill missing graphs for older completed Generate jobs.
 To build the same outputs from an extracted download, run:
@@ -567,6 +567,70 @@ labels two ordinary samples as untrained/trained. Camera maps require the saved
 `overlays/calibration.json`, camera records and matching overlay PNGs. If these are
 unavailable, range-grid graphs remain visible and the camera diagnostic is shown.
 Unconditional jobs without a real reference report why pixel gaps cannot be computed.
+
+**Optimal-transport distribution graphs.** Install the updated server requirements
+(or `python -m pip install 'POT>=0.9.6,<0.10'` in the environment used for offline
+analysis). Reports now include the following distribution measures:
+
+| Measure | What is compared / reported |
+| --- | --- |
+| Wasserstein-1 / Wasserstein-2 | Exact empirical 1D distances for all finite radial ranges, intensities when present, camera depths and overlay luminance; linear-program OT on sampled multivariate supports |
+| Sliced Wasserstein-2 | Monte Carlo distance over 64 reproducible random projections of each multivariate support |
+| Debiased Sinkhorn | Squared-cost KL-regularized cross-objective minus half each self-objective; distinct from the raw entropic transport cost |
+| Gromov-Wasserstein | Square root of the squared internal-distance distortion objective, with no factor of 1/2; a best-found nonconvex solution, not a certified global optimum |
+| Fused Gromov-Wasserstein | Normalized objective combining internal-distance structure and feature mismatch, default alpha 0.5 |
+| Unbalanced KL-OT | Full regularized objective with relaxed masses; cloud masses retain return probability per fixed ray exposure |
+
+Cloud W1/W2, sliced-W2 and GW square-root loss are in **metres**; cloud Sinkhorn
+divergence is in **m²**. The solver uses one shared sensor maximum-range scale for
+both clouds, then converts those values back. FGW/UOT remain normalized objectives.
+These objectives are not all mathematical metrics, and regularized UOT need not be
+zero for identical inputs. The graphs label units per measure; compare arms within
+the same space and measure rather than comparing unlike units.
+
+Image OT uses normalized `[u,v,R,G,B]` features on one common projected foreground
+for every arm, excluding label rows. GW therefore describes the internal relations
+of those spatial/appearance features. FGW adds RGB mismatch. Both photographs share
+the recorded background, so these scores assess overlays, not newly synthesized
+photographs. Camera scores are unavailable when calibrated image pairing is missing;
+cloud/range-distribution graphs still work. Wasserstein compares value distributions
+and can detect different changes from the separate aligned pixel-error maps.
+
+Multivariate OT uses a uniform seeded subset of **128 points per distribution** by
+default, with weights normalized to a probability distribution for balanced OT.
+LP distances are exact on that bounded support only, not on the complete point cloud.
+Sampling error can be material; increase the support limit when needed. GW/FGW use
+product and coordinate-W2 plan initializations and retain the lower feasible objective.
+Solver warnings, marginal residuals, iteration/stopping diagnostics, selected
+initialization, parameters and sampled indices are saved in the JSON/NPZ outputs.
+Sinkhorn retries difficult solves with warm-started potentials up to ten times the
+base iteration limit; marginal residuals remain checked. UOT costs explicitly use
+generalized KL with the mass correction terms, rather than a normalized-KL shortcut.
+Failure or missing support produces n/a with its reason; finite local GW results
+are labelled approximate. Small negative floating-point roundoff is clipped only
+within the documented numerical tolerance; significant invalid objectives are null.
+
+The UI, pixel HTML viewer, combined comparison viewer, single-NPZ viewer and PDF
+include OT bar graphs and empirical scalar CDF plots. The CSV has `ot/<space>` rows
+with a unit column. The frame NPZ additionally stores sampled supports, normalized
+cost matrices and W1/W2/GW/FGW/UOT couplings. PNGs are included in both download ZIPs.
+Rebuild existing client-side results without training or a server connection:
+
+```bash
+python -m pip install 'POT>=0.9.6,<0.10'
+python -m lidarpoc.pixel_graphs --job /path/to/extracted/job --ot-points 128 --ot-projections 64
+xdg-open /path/to/extracted/job/pixel_graphs.html
+```
+
+Support and projection counts accept 8–512. Other solver settings and the seed are
+retained in `pixel_graphs.json`; the initial seed comes from the saved job request.
+Use an isolated environment with consistent NumPy-compatible dependencies as in
+the quickstart. Evaluation uses NumPy/POT CPU solvers; it does not change the existing
+differentiable OT training losses or RL methods. Metric definitions follow
+[POT's linear OT API](https://pythonot.github.io/gen_modules/ot.lp.html),
+[Gromov-Wasserstein API](https://pythonot.github.io/gen_modules/ot.gromov.html),
+[unbalanced OT API](https://pythonot.github.io/gen_modules/ot.unbalanced.html) and
+[debiased Sinkhorn formulation](https://arxiv.org/abs/1810.08278).
 
 For API/CLI requests, keep `action: "generate"`, supply the manifest and trained
 checkpoint, and add `"compare_training": true`, `"auto_conditioning": true`,
@@ -857,6 +921,9 @@ the analysis from an existing paired job; it never trains or samples a model.
 `pixel_graphs.py` shares pixel analysis and graph rendering between regular and paired
 generation, the UI, offline viewers and downloads. It can backfill old saved runs
 without loading model weights; PNG rendering uses the existing Pillow dependency.
+`eval/transport_gap.py` owns scalar/multivariate OT estimates and solver diagnostics;
+`transport_graphs.py` prepares their distribution inputs and shared PNG/interactive
+plots. Training/experiment OT modules remain separate from this reporting library.
 
 GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 `PINNs/gpu_optimizer.py` and `PINNs/sandbox_optimizer_lib.py`. The tunnel adapts

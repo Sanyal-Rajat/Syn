@@ -1,6 +1,7 @@
 """Pixel analysis and portable graphs for conditioned Generate jobs; no model imports."""
 import argparse
 import csv
+from dataclasses import asdict
 from html import escape
 import json
 from pathlib import Path
@@ -14,7 +15,7 @@ from .eval.spatial_gap import overlay_rgb_gap, pixel_gap
 from .io import write_json
 from .logs import get_logger
 
-VERSION = 1
+VERSION = 2
 COLORS = ['#60a5fa', '#fbbf24', '#34d399', '#fb7185', '#c084fc', '#22d3ee']
 ERROR_COLORS = ['#38bdf8', '#34d399', '#facc15', '#f97316', '#ef4444']
 
@@ -91,6 +92,9 @@ def pixel_figures(row, maps):
     figure.update_yaxes(title_text='Fraction of compared pixels')
     figure.update_layout(height=390)
     figures.append(('Pixel-error distributions', figure))
+    if row.get('transport'):
+        from .transport_graphs import figures as transport_figures
+        figures = transport_figures(row['transport']) + figures
     return figures
 
 
@@ -159,11 +163,22 @@ def write_pngs(directory, row, maps):
     return [*graphs, {'file': filename, 'label': 'Pixel-error distributions (fraction of compared pixels)'}]
 
 
-def analyze_pixels(directory, report):
+def analyze_pixels(directory, report, transport_settings=None):
     """Analyze every generated sample against real; paired jobs also compare both arms."""
     directory = Path(directory).resolve()
     if not (directory / 'real_scene.npz').is_file():
         return {'version': VERSION, 'status': 'unavailable', 'reason': 'Pixel gaps require the real conditioning scene.', 'frames': []}
+    from .eval.transport_gap import TransportSettings
+    from .transport_graphs import analyze_frame, write_pngs as transport_pngs
+    try:
+        import ot
+    except ImportError as error:
+        raise ValueError('Optimal-transport graphs require POT: python -m pip install "POT>=0.9.6,<0.10"') from error
+    if transport_settings is None:
+        saved = report.get('pixel_analysis', {}).get('transport_settings')
+        request = directory / 'request.json'
+        seed = json.loads(request.read_text()).get('seed', 0) if request.is_file() else 0
+        transport_settings = TransportSettings(**saved) if saved else TransportSettings(seed=seed)
     files = ARMS if report.get('comparison') else {path.stem: path.name for path in sorted(directory.glob('sample_*.npz'))}
     if not files:
         raise ValueError('No generated NPZ files are available for pixel analysis')
@@ -221,29 +236,46 @@ def analyze_pixels(directory, report):
                 maps[key + '_pixel_depth_error'], maps[key + '_pixel_occupancy_difference'] = error, occupancy
                 values['overlay_rgb'], maps[key + '_pixel_rgb_error'] = overlay_rgb_gap(rgb[a], rgb[b], depths[a], depths[b])
             metrics[key] = values
+        transport, plans = analyze_frame(scenes, ranges, depths, rgb, pairs, frame,
+            float(reference['max_range_m']), transport_settings)
+        maps.update(plans)
         map_file = f'pixel_graphs/maps_{frame:03d}.npz'
         np.savez_compressed(directory / map_file, **maps)
         result = {'frame': frame, 'pairs': metrics, 'maps': map_file, 'images': images, 'camera_reason': reason,
-                  'camera_skew_ms': row.get('skew_ms') if row else None, 'histograms': error_histograms(maps, pairs)}
-        result['graphs'] = write_pngs(directory, result, maps)
+                  'camera_skew_ms': row.get('skew_ms') if row else None, 'histograms': error_histograms(maps, pairs),
+                  'transport': transport}
+        result['graphs'] = transport_pngs(directory, frame, transport) + write_pngs(directory, result, maps)
         frames.append(result)
         get_logger().info('Exported pixel graphs for frame %d; camera=%s', frame, 'available' if depths else reason)
     result = {'version': VERSION, 'status': 'completed' if all(row['images'] for row in frames) else 'range_grid_only',
+              'transport_settings': asdict(transport_settings), 'pot_version': ot.__version__,
               'frames': frames, 'html': 'pixel_graphs.html', 'csv': 'pixel_graphs/metrics.csv',
               'definitions': {'range_grid': 'LiDAR beam/azimuth pixels; radial ranges in metres, independent of camera availability.',
                   'camera': 'Timestamp-matched optical-camera pixels; optical depth in metres.',
                   'support': 'Depth error uses shared valid pixels; occupancy uses the union. Missing support is blank/null, never fabricated zero.',
                   'display': 'Display blocks retain the largest absolute difference. All metrics and saved NPZ maps use full resolution.',
                   'overlay_rgb': 'RGB error on projected foreground over the same recorded photo, excluding the label strip; not synthetic RGB fidelity.',
-                  'conditioning': 'Geometry agreement is constrained by real conditioning and range clamping; these are descriptive paired-scene gaps.'}}
+                  'conditioning': 'Geometry agreement is constrained by real conditioning and range clamping; these are descriptive paired-scene gaps.',
+                  'ot_scalar': 'Scalar Wasserstein-1/2 use all finite radial-range, intensity, optical-depth and overlay-luminance values. Marginal OT is separate from aligned pixel error.',
+                  'ot_support': 'Multivariate metrics use a uniform seeded subsample (default 128 points per distribution). Exact LP W1/W2 are exact only on that support. CDF display uses at most 256 knots; scalar metrics use all values.',
+                  'ot_units': 'Cloud W1/W2/sliced-W2/GW sqrt loss: metres. Cloud Sinkhorn: m^2. XYZ is divided by one common max-range scale for solving, then those metrics are converted back. FGW/UOT objectives remain normalized.',
+                  'ot_gromov': 'GW uses squared differences of internal Euclidean distances; reported value is sqrt(objective), without a factor of 1/2. GW/FGW select the best of product and coordinate-W2 initializations; global optimality is not guaranteed. Plans and stopping diagnostics are saved.',
+                  'ot_fgw': 'FGW alpha=0.5 by default: internal-distance structure plus squared feature cost. Cloud features are normalized radial range and available intensity; image features are RGB.',
+                  'ot_sinkhorn': 'Debiased Sinkhorn uses the full KL-regularized squared-cost objective minus half each self-objective. Significant negative/nonfinite objectives or invalid marginals produce null with diagnostics, not a fabricated zero.',
+                  'ot_unbalanced': 'Unbalanced KL-OT uses the full regularized objective, with fixed-exposure return probabilities as cloud masses; it need not vanish on identical inputs and is not reported as a metric.',
+                  'ot_images': 'Image OT uses [u_norm,v_norm,R,G,B] with pixel coordinates and RGB in 0..1 on one common projected foreground for all arms. Its units are normalized and cannot be compared numerically with metre-valued cloud distances. Backgrounds are recorded; this is not synthetic-RGB fidelity.'}}
     with (directory / result['csv']).open('w', newline='') as handle:
         writer = csv.writer(handle)
-        writer.writerow(['frame', 'pair', 'space', 'metric', 'value'])
+        writer.writerow(['frame', 'pair', 'space', 'metric', 'value', 'unit'])
         for row in frames:
             for pair, values in row['pairs'].items():
                 for space in ('range_pixel', 'camera_pixel', 'overlay_rgb'):
                     for metric, value in (values[space] or {}).items():
-                        writer.writerow([row['frame'], pair, space, metric, value])
+                        writer.writerow([row['frame'], pair, space, metric, value, ''])
+            for space, data in row['transport']['spaces'].items():
+                for pair, record in data['pairs'].items():
+                    for metric, value in record['values'].items():
+                        writer.writerow([row['frame'], pair, 'ot/' + space, metric, value, record['units'][metric]])
     write_pixel_html(directory, result)
     write_json(directory / 'pixel_graphs.json', result)
     return result
@@ -265,8 +297,8 @@ def write_pixel_html(directory, result):
     options = ''.join(f'<option value="{row["frame"]}">Frame {row["frame"]}</option>' for row in result['frames'])
     definitions = ''.join('<li>' + escape(value) + '</li>' for value in result['definitions'].values())
     document = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-        '<title>Pixel domain gaps</title><style>body{background:#111827;color:#e2e8f0;font:15px system-ui;margin:24px}'
-        'select{padding:8px}h2{margin-top:32px}</style></head><body><h1>Pixel domain gaps</h1>'
+        '<title>Pixel and optimal-transport domain gaps</title><style>body{background:#111827;color:#e2e8f0;font:15px system-ui;margin:24px}'
+        'select{padding:8px}h2{margin-top:32px}</style></head><body><h1>Pixel and optimal-transport domain gaps</h1>'
         '<p>Signed occupancy: A is the reference, B is the candidate. Orange: A only; blue: B only. '
         'Heatmap scales use the observed maximum per metric. Blank pixels have no valid support.</p>'
         f'<ul>{definitions}</ul><label>Temporal frame <select onchange="showFrame(this.value)">{options}</select></label>'
@@ -276,14 +308,14 @@ def write_pixel_html(directory, result):
     (directory / result['html']).write_text(document, encoding='utf-8')
 
 
-def rebuild(directory):
+def rebuild(directory, transport_settings=None):
     """Backfill existing generated artifacts without training, sampling or remote data access."""
     directory = Path(directory).resolve()
     source = directory / 'result.json'
     report = json.loads(source.read_text())
     if report.get('action') != 'generate':
         raise ValueError('Pixel graphs require an existing Generate job')
-    report['pixel_analysis'] = analyze_pixels(directory, report)
+    report['pixel_analysis'] = analyze_pixels(directory, report, transport_settings)
     if report.get('comparison'):
         from .comparison import analyze
         report['comparison'] = analyze(directory, report, report['comparison']['voxel_size_m'])
@@ -296,6 +328,20 @@ def rebuild(directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--job', type=Path, required=True)
+    parser.add_argument('--ot-points', type=int, help='Maximum multivariate OT support per distribution (8..512; default 128)')
+    parser.add_argument('--ot-projections', type=int, help='Sliced-Wasserstein projection count (8..512; default 64)')
     arguments = parser.parse_args()
-    report = rebuild(arguments.job)
+    settings = None
+    if arguments.ot_points is not None or arguments.ot_projections is not None:
+        from .eval.transport_gap import TransportSettings
+        existing = json.loads((arguments.job / 'result.json').read_text()).get('pixel_analysis', {}).get('transport_settings', {})
+        if 'seed' not in existing:
+            request = arguments.job / 'request.json'
+            existing['seed'] = json.loads(request.read_text()).get('seed', 0) if request.is_file() else 0
+        if arguments.ot_points is not None:
+            existing['max_points'] = arguments.ot_points
+        if arguments.ot_projections is not None:
+            existing['projections'] = arguments.ot_projections
+        settings = TransportSettings(**existing)
+    report = rebuild(arguments.job, settings)
     print(json.dumps({'status': report['pixel_analysis']['status'], 'viewer': str(arguments.job / 'pixel_graphs.html')}, indent=2))

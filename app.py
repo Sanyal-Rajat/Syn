@@ -480,7 +480,7 @@ def monitor():
             st.session_state[cache] = api('GET', f'/jobs/{job_id}/result', timeout=60).json()
         report = st.session_state[cache]
         if report['action'] == 'generate':
-            if st.button('Build / refresh pixel graphs', key=f'pixel_rebuild:{job_id}',
+            if st.button('Build / refresh pixel and OT graphs', key=f'pixel_rebuild:{job_id}',
                          help='Analyze the saved NPZs and camera overlays, without retraining or generation.'):
                 with st.spinner('Building pixel graphs from saved data on the server...'):
                     report = api('POST', f'/jobs/{job_id}/pixel-graphs/rebuild', timeout=180).json()
@@ -496,11 +496,19 @@ def monitor():
             st.success(f"Generated {report['samples']} LiDAR windows.")
             comparison = report.get('comparison')
             pixels = report.get('pixel_analysis', {})
-            st.subheader('Pixel domain-gap graphs')
+            st.subheader('Pixel and optimal-transport domain-gap graphs')
             if pixels.get('frames'):
                 st.caption('LiDAR range-grid pixels and camera pixels are separate measurements. Blank map pixels have no valid support; metrics use full resolution.')
                 pixel_row = st.selectbox('Pixel graph frame', pixels['frames'],
                     format_func=lambda row: f"Frame {row['frame']}", key=f'pixel_frame:{job_id}')
+                if pixel_row.get('transport'):
+                    st.caption('OT graphs compare distributions: W1/W2, sliced W2, debiased Sinkhorn, GW, fused GW and unbalanced OT. Multivariate supports are sampled; scalar Wasserstein metrics use all values. Units and solver diagnostics are recorded in the export.')
+                    with st.expander('Optimal-transport scores and solver details'):
+                        st.dataframe([{'space': space, 'pair': pair, 'measure': metric, 'value': value,
+                            'unit': record['units'][metric]}
+                            for space, data in pixel_row['transport']['spaces'].items()
+                            for pair, record in data['pairs'].items() for metric, value in record['values'].items()], hide_index=True)
+                        st.json({'settings': pixels['transport_settings'], 'spaces': pixel_row['transport']['spaces']})
                 errors = pd.DataFrame([{'pair': name, 'LiDAR radial range MAE (m)': values['range_pixel']['depth_mae_m'],
                     'Camera optical-depth MAE (m)': (values['camera_pixel'] or {}).get('depth_mae_m')}
                     for name, values in pixel_row['pairs'].items()]).set_index('pair')
