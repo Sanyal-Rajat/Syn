@@ -15,6 +15,7 @@ def training_job(runs, index, manifest, status='completed', window=2):
     (folder / 'checkpoint.pt').write_bytes(b'fixture checkpoint; discovery must not load model weights')
     (folder / 'state.json').write_text(json.dumps({'id': folder.name, 'action': 'train', 'status': status}))
     (folder / 'request.json').write_text(json.dumps({'manifest': str(manifest), 'window': window}))
+    (folder / 'training.json').write_text('[{"epoch":1}]')
     (folder / 'result.json').write_text(json.dumps({'action': 'train', 'checkpoint': str(folder / 'checkpoint.pt')}))
     os.utime(folder / 'state.json', (index + 1, index + 1))
     return folder
@@ -74,8 +75,45 @@ def test_manual_directory_resolves_its_window_and_unconditional_does_not_create_
 
 def test_no_matching_job_keeps_fields_empty_and_moved_checkpoints_remain_usable(prepared, tmp_path):
     result = prepare_generation_inputs(tmp_path / 'runs', prepared)
-    assert result == {'checkpoint': '', 'conditioning': '', 'checkpoints': []}
+    assert not result['checkpoint'] and not result['conditioning'] and not result['checkpoints']
+    assert str(tmp_path / 'runs') in result['diagnostic']
     moved = tmp_path / 'own-checkpoint.pt'
     moved.write_bytes(b'moved weights; no request metadata')
     result = prepare_generation_inputs(tmp_path / 'runs', prepared, str(moved))
     assert result['checkpoint'] == str(moved) and not result['conditioning']
+
+
+@pytest.mark.parametrize('status', ['failed', 'interrupted', 'legacy', 'nested'])
+def test_saved_checkpoints_are_recovered_without_completed_result(prepared, tmp_path, status):
+    runs = tmp_path / 'runs'
+    parent = runs / 'experiment' / 'experiments' / 'seed_0' if status == 'nested' else runs
+    folder = training_job(parent, 0, prepared, status=status)
+    (folder / 'result.json').unlink()
+    if status in ('legacy', 'nested'):
+        (folder / 'state.json').unlink()
+    result = prepare_generation_inputs(runs, prepared)
+    assert result['checkpoint'] == str(folder / 'checkpoint.pt')
+    assert Path(result['conditioning']).is_file()
+    assert 'saved checkpoint' in result['diagnostic']
+
+
+def test_recovery_rejects_running_empty_and_mismatched_checkpoints(prepared, tmp_path):
+    runs = tmp_path / 'runs'
+    training_job(runs, 0, prepared, status='running')
+    other = tmp_path / 'other.json'
+    other.write_text(Path(prepared).read_text() + '\n')
+    training_job(runs, 1, other, status='failed')
+    empty = training_job(runs, 2, prepared, status='failed')
+    (empty / 'checkpoint.pt').write_bytes(b'')
+    assert not prepare_generation_inputs(runs, prepared)['checkpoint']
+
+
+@pytest.mark.parametrize('history', [None, [], [{'epoch': 0}], ['invalid record']])
+def test_recovery_does_not_select_an_untrained_checkpoint(prepared, tmp_path, history):
+    folder = training_job(tmp_path / 'runs', 0, prepared, status='failed')
+    path = folder / 'training.json'
+    if history is None:
+        path.unlink()
+    else:
+        path.write_text(json.dumps(history))
+    assert not prepare_generation_inputs(tmp_path / 'runs', prepared)['checkpoint']

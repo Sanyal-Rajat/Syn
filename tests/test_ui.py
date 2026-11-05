@@ -210,7 +210,8 @@ def test_detected_paths_preserve_manual_overrides_and_can_be_restored(detected_r
     app.radio[0].set_value('Generate').run()
     assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == '/remote/custom/scene.npz'
     next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('').run()
-    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/new/train/checkpoint.pt'
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
     next(button for button in app.button if button.label == 'Use detected paths').click().run()
     assert not app.exception
     assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/new/train/checkpoint.pt'
@@ -219,6 +220,28 @@ def test_detected_paths_preserve_manual_overrides_and_can_be_restored(detected_r
     assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == ''
     next(button for button in app.button if button.label == 'Start remote job').click().run()
     assert submitted[-1]['conditioning'] == '' and not submitted[-1]['auto_conditioning']
+
+
+@pytest.mark.parametrize('old_server', [False, True])
+def test_disabled_generation_explains_lookup_failure_or_missing_checkpoint(prepared_remote, monkeypatch, old_server):
+    submitted, _ = prepared_remote
+    original = httpx.request
+
+    def request(method, url, **kwargs):
+        if url.endswith('/generation/inputs'):
+            return httpx.Response(404 if old_server else 200,
+                json={'detail': 'Not Found'} if old_server else {'checkpoint': '', 'conditioning': '',
+                    'checkpoints': [], 'diagnostic': 'No matching checkpoint.pt under /server/custom-runs'},
+                request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    assert not app.exception and not submitted
+    message = next(item.value for item in app.info if item.value.startswith('Start remote job is disabled'))
+    assert ('Update the server code and restart its API' if old_server else '/server/custom-runs') in message
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
 
 
 def test_empty_manifest_disables_submission_without_hiding_monitoring(remote):

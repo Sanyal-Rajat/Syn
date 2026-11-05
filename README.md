@@ -272,7 +272,12 @@ reconstruction. The original calibration metrics describe sensor-frame persisten
 the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
 **Generate** fills the checkpoint field from the latest completed training job
-matching the selected frozen manifest. With **Automatically extract a real scene
+matching the selected frozen manifest. If no completed report is available, it
+also checks saved `checkpoint.pt` files in older/interrupted jobs and experiment
+subfolders. Recovery requires matching recorded manifest metadata, a recorded
+training epoch and a nonempty checkpoint file. It skips active jobs and untrained
+baselines; the normal checkpoint provenance checks still run before generation.
+With **Automatically extract a real scene
 from the prepared dataset** enabled, it also fills the scene field with a real
 training window matching that checkpoint's frame count. The server creates or
 reuses this small scene cache under
@@ -287,7 +292,8 @@ embedded so it can be opened directly in `view_syn_npz.py`.
 
 A supplied scene path overrides automatic extraction and is also exported as
 `real_scene.npz`. Manual checkpoint and scene entries are remembered across
-operation changes. Click **Use detected paths** to restore automatic choices.
+operation changes. Click **Use detected paths** to restore automatic choices;
+clearing the checkpoint field also restores automatic checkpoint selection.
 To retain unconditional generation, disable automatic extraction
 and leave the scene path blank (`"auto_conditioning": false` in JSON requests).
 Automatic extraction never selects validation/test frames. The result JSON records
@@ -332,7 +338,9 @@ creates dataset caches and a manifest; creating a scene NPZ supplies conditionin
 geometry. Neither operation trains the model. The checkpoint path is remembered
 when switching operations in the same client session. The Generate button stays
 disabled until both the prepared manifest and checkpoint paths are filled in;
-a message beside the button identifies the missing fields. Automatic real-scene
+a message beside the button identifies the missing fields. Input lookup failures
+identify an outdated/unavailable API, and unsuccessful checkpoint
+searches report the actual server runs folder. Automatic real-scene
 extraction does not remove the checkpoint requirement. If no trained
 checkpoint exists, run **Train diffusion + calibration** with the selected manifest
 first. Exports include checkpoint provenance, runtime dependency

@@ -137,7 +137,8 @@ def generation_path_input(label, name, default='', help=None):
         st.session_state[field_key] = saved['path']
 
     def edit():
-        saved.update(path=st.session_state[field_key].strip(), manual=True)
+        path = st.session_state[field_key].strip()
+        saved.update(path=path, manual=bool(path) if name == 'checkpoint' else True)
 
     return st.text_input(label, key=field_key, on_change=edit, help=help).strip()
 
@@ -206,7 +207,7 @@ with configure:
                     generation_saved_path(name).update(path='', manual=False)
                     st.session_state[f'{name}_field:{endpoint}'] = ''
                 st.rerun()
-            detected = {}
+            detected, lookup_error = {}, ''
             if config['manifest']:
                 saved_checkpoint = generation_saved_path('checkpoint')
                 saved_scene = generation_saved_path('conditioning')
@@ -216,11 +217,17 @@ with configure:
                         'auto_conditioning': config['auto_conditioning'] and not (saved_scene['manual'] and saved_scene['path'])}).json()
                 except httpx.HTTPError as error:
                     detail = error.response.text if isinstance(error, httpx.HTTPStatusError) else str(error)
-                    st.caption(f'Automatic input lookup unavailable; enter paths manually or update the server API. {detail}')
+                    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in (404, 405):
+                        lookup_error = ('Automatic checkpoint lookup is unavailable on the connected server. '
+                            'Update the server code and restart its API, then click Use detected paths.')
+                    else:
+                        lookup_error = f'Automatic checkpoint lookup failed: {detail}'
             config['checkpoint'] = generation_path_input('Own checkpoint path on the server', 'checkpoint', detected.get('checkpoint', ''),
                 help='Automatically selects the latest completed training checkpoint matching this manifest. You can enter a checkpoint file or its training job directory. Manual entries are remembered across operations.')
             config['conditioning'] = generation_path_input('Optional synthetic scene NPZ on the server', 'conditioning', detected.get('conditioning', ''),
                 help='Automatically populated with a real training window when enabled. You can override it with matching range/valid arrays [T,H,W].')
+            if config['checkpoint'] and (lookup_error or detected.get('diagnostic')):
+                st.caption(lookup_error or detected['diagnostic'])
             st.caption('The real scene and synthetic samples are included in the artifact download. '
                        'To generate without conditioning, turn off automatic extraction and leave the scene path blank.')
             config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')
@@ -295,8 +302,11 @@ with configure:
     if missing_inputs:
         message = 'Start remote job is disabled: enter ' + ' and '.join(missing_inputs) + '.'
         if action == 'generate' and not config['checkpoint']:
-            message += (' Generation requires a trained checkpoint from a completed Train job result.json. '
+            message += (' Generation requires a trained checkpoint matching the selected manifest. '
                         'Automatic real-scene extraction supplies geometry; it does not train the model.')
+            if config['manifest']:
+                message += ' ' + (lookup_error or detected.get('diagnostic') or
+                    'No checkpoint was returned by the server. Click Use detected paths, or enter the full checkpoint.pt path.')
         st.info(message)
     if st.button('Start remote job', type='primary', disabled=bool(missing_inputs)):
         try:
