@@ -176,7 +176,12 @@ with configure:
         config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', value=True,
             help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
-            config['checkpoint'] = st.text_input('Own checkpoint path on the server')
+            config['checkpoint'] = st.text_input('Own checkpoint path on the server',
+                help='Required: use the checkpoint path from a completed Train job result.json. Preparation and scene NPZ files do not contain trained model weights.').strip()
+            if not config['checkpoint']:
+                st.info('Generation requires a trained checkpoint. Complete Train diffusion + calibration with this manifest, '
+                        'then enter the checkpoint path from that training job\'s result.json. '
+                        'A scene NPZ provides geometry; it does not replace the trained model.')
             config['conditioning'] = st.text_input('Optional synthetic scene NPZ on the server',
                                                   help='range and valid arrays [T,H,W], matching the checkpoint sensor. Full-scene geometry is preserved.')
             config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')
@@ -244,6 +249,8 @@ with configure:
                 for split, key in [('Training', 'scene_files'), ('Development', 'development_scene_files'), ('Test', 'test_scene_files')]:
                     config['experiment'][key] = [line.strip() for line in st.text_area(f'{split} canonical NPZ paths on server (one per line)').splitlines() if line.strip()]
     can_start = action == 'prepare' or bool(config['manifest'])
+    if action == 'generate':
+        can_start = can_start and bool(config['checkpoint'])
     if st.button('Start remote job', type='primary', disabled=not can_start):
         try:
             state = api('POST', '/jobs', json=config).json()

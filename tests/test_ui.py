@@ -172,6 +172,29 @@ def test_empty_manifest_disables_submission_without_hiding_monitoring(remote):
     assert len(app.get('vega_lite_chart')) + len(app.get('arrow_vega_lite_chart')) == 2
 
 
+@pytest.mark.parametrize('checkpoint', ['', '   '])
+def test_generate_requires_checkpoint_even_with_manifest_and_scene(remote, checkpoint):
+    from lidarpoc.config import RunConfig
+
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/prepared/manifest.json').run()
+    next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').set_value('/remote/real_scene.npz').run()
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value(checkpoint).run()
+    assert not app.exception
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    assert not remote
+    assert any('Generation requires a trained checkpoint' in message.value for message in app.info)
+    assert len(app.get('vega_lite_chart')) + len(app.get('arrow_vega_lite_chart')) == 2
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value(' /remote/train/checkpoint.pt ').run()
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    request = RunConfig(**remote[-1])
+    assert request.action == 'generate' and request.checkpoint == '/remote/train/checkpoint.pt'
+    assert request.conditioning == '/remote/real_scene.npz'
+
+
 def test_experiment_automatically_uses_latest_completed_preparation(prepared_remote):
     from lidarpoc.config import RunConfig
     submitted, choices = prepared_remote

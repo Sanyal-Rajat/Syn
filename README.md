@@ -288,7 +288,13 @@ The export profile is chosen on validation. No downstream, commercial-release or
 cross-sensor transfer claim follows automatically from these statistics.
 
 Use **Generate** with an own `checkpoint.pt`, optionally its `profiles.json` and a
-profile name such as `ppo`. Exports include checkpoint provenance, runtime dependency
+profile name such as `ppo`. **Own checkpoint path on the server** is required:
+copy the `checkpoint` value from a completed training job's `result.json`. Prepare
+creates dataset caches and a manifest; creating a scene NPZ supplies conditioning
+geometry. Neither operation trains the model. The Generate button stays disabled
+until both the prepared manifest and checkpoint paths are filled in. If no trained
+checkpoint exists, run **Train diffusion + calibration** with the selected manifest
+first. Exports include checkpoint provenance, runtime dependency
 lock, notices, fitted RL policies, calibrated profiles, metrics and numeric sample NPZ files.
 Model checkpoints contain the source commit, adapter hashes, training-manifest hash,
 sensor configuration and license evidence. Foreign pretrained checkpoints are rejected.
@@ -521,6 +527,7 @@ An existing completed server job gets a PDF on its first report/artifact request
 | `mux_client_forward: forwarding request failed` | Check `bash ssh_tunnel.sh status` and the health URL first; an existing forward may already work. Use `ss -ltnp 'sport = :9000'` to identify a conflicting client listener. The UI must bind `127.0.0.1`; the API forward must bind `127.0.0.2`. Remove only the conflicting forward before retrying. |
 | Explicit SSH control socket is unavailable | The `-S` path must belong to a running master. Start the reusable connection shown above, or omit `-S` to let the helper establish a managed connection. |
 | HTTP 422: missing manifest | Complete Prepare, then select its manifest from **Completed preparation**. JSON requests need the full server path to `prepared/manifest.json`. |
+| HTTP 422: generation requires a checkpoint | Enter the `checkpoint` path from the completed training job's `result.json`, using the same manifest. If training has not run, complete **Train diffusion + calibration** first. A conditioning NPZ is a scene input, not a model checkpoint. |
 | Beam inference fails its residual/spacing check | Confirm `vehicle` versus `sensor` coordinates. Supply 128 sorted measured beam elevations in degrees if inference still fails. Mounting/FOV configuration is not a beam calibration table. |
 | GPU utilization is zero during preparation | Downloading, decompression, trace decoding, beam estimation and file writes use CPU/I/O. GPU projection runs between those stages; check the processing log for the current stage. |
 | Training uses only one GPU | Keep **Remote GPUs (-1 = all, 0 = CPU)** at `-1` and automatic optimization enabled; check server-side `torch.cuda.device_count()`, `CUDA_VISIBLE_DEVICES` and rank/resource logs. A small sample bank or one ready task may not occupy every device. |
