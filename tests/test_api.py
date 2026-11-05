@@ -5,6 +5,8 @@ from pathlib import Path
 import time
 import zipfile
 
+import numpy as np
+
 from fastapi.testclient import TestClient
 import server
 
@@ -75,8 +77,40 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
                 break
             time.sleep(.1)
         assert state['status'] == 'completed', state
-        assert client.get(f'/jobs/{generation_id}/result').json()['calibration_profile'] == 'ppo'
+        generated = client.get(f'/jobs/{generation_id}/result').json()
+        assert generated['calibration_profile'] == 'ppo'
+        assert generated['conditioning_source']['split'] == 'train'
+        assert generated['geometry']['new_surface_returns'] == 0
+        reference_path = generated['real_scene']
+        assert Path(reference_path).name == 'real_scene.npz'
+        with np.load(reference_path, allow_pickle=False) as real, np.load(server.ROOT / generation_id / 'sample_000.npz') as synthetic:
+            assert real['range'].shape == synthetic['range'].shape == (2, 4, 16)
+            valid = synthetic['valid']
+            assert not valid[~real['valid']].any()
+            assert (abs(synthetic['range'][valid] - real['range'][valid]) <= .10001).all()
+        archive = zipfile.ZipFile(io.BytesIO(client.get(f'/jobs/{generation_id}/artifacts').content))
+        assert {'real_scene.npz', 'sample_000.npz', 'result.json', 'result.pdf'} <= set(archive.namelist())
         assert client.get(f'/jobs/{generation_id}/report').content.startswith(b'%PDF-')
+        for scene in ('', reference_path):
+            response = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
+                'checkpoint': report['checkpoint'], 'gpus': 0, 'sample_steps': 2, 'samples_per_trace': 1,
+                'auto_conditioning': False, 'conditioning': scene})
+            assert response.status_code == 202, response.text
+            job = response.json()['id']
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                state = client.get(f'/jobs/{job}').json()
+                if state['status'] != 'running':
+                    break
+                time.sleep(.1)
+            assert state['status'] == 'completed', state
+            result = client.get(f'/jobs/{job}/result').json()
+            assert bool(result['real_scene']) == bool(scene)
+            assert (server.ROOT / job / 'real_scene.npz').exists() == bool(scene)
+            if scene:
+                assert result['conditioning_source'] == {'kind': 'file', 'path': reference_path}
+            else:
+                assert result['conditioning'] is None and result['geometry'] is None
 
 
 def test_cancellation_and_rejected_inputs(prepared, tmp_path, monkeypatch):

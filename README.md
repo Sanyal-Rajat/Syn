@@ -271,6 +271,34 @@ surfaces to the configured tolerance. This is ray-space conditioning, not scene
 reconstruction. The original calibration metrics describe sensor-frame persistence;
 the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
+**Generate** automatically extracts the first complete window from the manifest's
+**training split**, using the checkpoint's temporal window length. Leave the scene
+path blank and keep **Automatically extract a real scene from the prepared dataset**
+enabled. The job saves `real_scene.npz` alongside `sample_000.npz`, `sample_001.npz`,
+and the remaining synthetic variants of that same window. No manual extraction
+script is needed. The real scene contains copied recorded LiDAR data, not newly
+generated real-world measurements or RGB images. Its original ranges, masks,
+intensities, labels and timestamps are retained where available; beam metadata is
+embedded so it can be opened directly in `view_syn_npz.py`.
+
+A supplied scene path overrides automatic extraction and is also exported as
+`real_scene.npz`. To retain unconditional generation, disable automatic extraction
+and leave the scene path blank (`"auto_conditioning": false` in JSON requests).
+Automatic extraction never selects validation/test frames. The result JSON records
+the exported scene path and its source trace/frame records, and the artifact ZIP
+contains both the conditioning scene and synthetic outputs. Use the same viewer
+and frame index to compare them:
+
+```bash
+# Run on the client after extracting the downloaded artifact ZIP:
+python view_syn_npz.py real_scene.npz --frame 0 --output real_scene.html
+python view_syn_npz.py sample_000.npz --frame 0 --output synthetic_scene.html
+```
+
+This automation supplies conditioning geometry; it does not establish that the
+diffusion model has learned realistic scenes. The existing surface-deviation and
+ray-mask constraints still apply.
+
 The RL library adapts the working policy-gradient, deterministic-control and DQN
 agents from the requested existing project. SAC in that source is disabled;
 Syn retains its independent working SAC implementation. RL methods calibrate
@@ -465,7 +493,7 @@ files depend on the operation:
 | --- | --- |
 | Prepare | `prepared/manifest.json` and per-frame numeric caches |
 | Train | `checkpoint.pt`, `training.json`, `profiles.json`, `sample_000.npz`, resource records and any fitted RL policies |
-| Generate | `sample_*.npz` and provenance in `result.json` |
+| Generate | `real_scene.npz` when conditioned, `sample_*.npz` and provenance in `result.json` |
 | Experiment | `experiments/`, `scenes/`, selection records and per-arm checkpoints/controllers |
 
 Successful Prepare, Train, Generate and Experiment jobs also save `result.pdf`

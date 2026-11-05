@@ -123,6 +123,13 @@ def _run(config, directory):
     from .sampling import SamplingPool
     sampler = SamplingPool(model, [f'cuda:{index}' for index in range(config.gpus)])
     window = checkpoint['config']['window']
+    real_scene, conditioning_source = None, None
+    if config.action == 'generate' and (config.conditioning or config.auto_conditioning):
+        from .data.conditioning import export_real_scene
+        progress('extracting real conditioning scene')
+        real_scene, conditioning_source = export_real_scene(manifest, window, directory, config.conditioning)
+        config = config.model_copy(update={'conditioning': real_scene})
+        write_json(directory / 'request.json', config.model_dump())
     conditioning = None
     if config.conditioning:
         with np.load(config.conditioning, allow_pickle=False) as scene:
@@ -157,6 +164,8 @@ def _run(config, directory):
                                 elevations=np.asarray(manifest['sensor_meta']['elevations']))
         report = {'action': 'generate', 'samples': len(generated), 'checkpoint': str(checkpoint_path),
                   'conditioning': config.conditioning or None, 'pretrained_weights_used': False}
+        report['real_scene'] = real_scene
+        report['conditioning_source'] = conditioning_source
         report['geometry'] = geometry
         report['calibration_profile'] = config.profile_name if config.profile_file else 'uncalibrated'
         report['generation_controller'] = config.controller_file or None

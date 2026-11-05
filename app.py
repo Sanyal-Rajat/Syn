@@ -182,8 +182,12 @@ with configure:
                 st.info('Generation requires a trained checkpoint. Complete Train diffusion + calibration with this manifest, '
                         'then enter the checkpoint path from that training job\'s result.json. '
                         'A scene NPZ provides geometry; it does not replace the trained model.')
+            config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', value=True,
+                help='When no scene path is supplied, use the first complete training window, matching the checkpoint window length. Save real_scene.npz beside the synthetic samples.')
             config['conditioning'] = st.text_input('Optional synthetic scene NPZ on the server',
-                                                  help='range and valid arrays [T,H,W], matching the checkpoint sensor. Full-scene geometry is preserved.')
+                help='Optional override: range and valid arrays [T,H,W], matching the checkpoint sensor. The supplied scene takes priority over automatic extraction.').strip()
+            st.caption('The real scene and synthetic samples are included in the artifact download. '
+                       'To generate without conditioning, turn off automatic extraction and leave the scene path blank.')
             config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')
             config['profile_name'] = st.text_input('Calibration profile name', 'ppo')
             config['controller_file'] = st.text_input('Optional frozen OT controller.pt on the server',
@@ -334,6 +338,10 @@ def monitor():
             st.dataframe(report['inventory'])
         elif report['action'] == 'generate':
             st.success(f"Generated {report['samples']} LiDAR windows.")
+            if report.get('real_scene'):
+                st.write('Real conditioning scene on the remote server:')
+                st.code(report['real_scene'])
+                st.caption('Download artifacts to get real_scene.npz and sample_*.npz for comparison in the same viewer.')
         elif report['action'] == 'experiment':
             st.write(f"Selected on development data: {report['selected_arm']}")
             st.dataframe([{'arm': name, 'test_OT_gap': value['mean'], 'session_CI95': str(value['ci95'])}

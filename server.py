@@ -230,7 +230,7 @@ def artifacts(job_id: str):
     pdf_report(path)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
-        for filename in ('request.json', 'result.json', 'result.pdf', 'dependency-lock.json', 'profiles.json', 'training.json',
+        for filename in ('request.json', 'result.json', 'result.pdf', 'dependency-lock.json', 'profiles.json', 'training.json', 'real_scene.npz',
                          'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz',
                          'resources.json', 'batch_backoff.json'):
             if (path / filename).is_file():

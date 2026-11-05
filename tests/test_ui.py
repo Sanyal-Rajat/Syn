@@ -193,6 +193,20 @@ def test_generate_requires_checkpoint_even_with_manifest_and_scene(remote, check
     request = RunConfig(**remote[-1])
     assert request.action == 'generate' and request.checkpoint == '/remote/train/checkpoint.pt'
     assert request.conditioning == '/remote/real_scene.npz'
+    assert request.auto_conditioning
+
+
+@pytest.mark.parametrize('automatic', [True, False])
+def test_generate_supports_automatic_real_scene_and_unconditional_opt_out(remote, automatic):
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/manifest.json').run()
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('/remote/checkpoint.pt').run()
+    next(field for field in app.checkbox if field.label == 'Automatically extract a real scene from the prepared dataset').set_value(automatic).run()
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    assert remote[-1]['auto_conditioning'] is automatic
+    assert remote[-1]['conditioning'] == ''
 
 
 def test_experiment_automatically_uses_latest_completed_preparation(prepared_remote):

@@ -114,6 +114,9 @@ def findings(report):
     elif action == 'generate':
         text.append(f"Generated {report.get('samples', 0)} LiDAR windows; calibration profile: "
                     f"{report.get('calibration_profile', 'not reported')}.")
+        if report.get('real_scene'):
+            text.append(f"Exported conditioning scene: {report['real_scene']}. "
+                        'This contains the input geometry, not an independently generated real-world scene.')
     return text
 
 

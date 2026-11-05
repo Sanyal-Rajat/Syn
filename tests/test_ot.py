@@ -194,6 +194,12 @@ def test_full_ot_matrix_controllers_and_no_test_fit_leakage(prepared, tmp_path, 
         conditioning=str(synthetic), gpus=0, sample_steps=2, samples_per_trace=1), tmp_path / 'controlled_generation')
     assert generated['geometry']['new_surface_returns'] == 0
     assert generated['generation_controller'] == str(policy_path)
+    automatic = run(RunConfig(action='generate', manifest=prepared,
+        checkpoint=str(output / 'experiments/seed_0/E4/checkpoint.pt'), controller_file=str(policy_path),
+        gpus=0, sample_steps=2, samples_per_trace=1), tmp_path / 'automatic_controlled_generation')
+    assert automatic['conditioning_source']['split'] == 'train'
+    assert automatic['geometry']['new_surface_returns'] == 0
+    assert Path(automatic['real_scene']).is_file()
     for method in RL_METHODS:
         if method in ('ppo', 'sac'):
             continue

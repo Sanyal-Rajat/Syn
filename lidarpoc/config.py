@@ -46,6 +46,7 @@ class RunConfig(BaseModel):
     rl: RLConfig = Field(default_factory=RLConfig)
     budget: int = Field(30, ge=6, le=5000)
     conditioning: str = ''
+    auto_conditioning: bool = True
     profile_file: str = ''
     profile_name: str = 'ppo'
     controller_file: str = ''
@@ -66,8 +67,8 @@ class RunConfig(BaseModel):
             raise ValueError('Provide the prepared split manifest path on the server')
         if self.action == 'generate' and not self.checkpoint:
             raise ValueError('Generation requires a checkpoint produced by this application')
-        if self.controller_file and (self.action != 'generate' or not self.conditioning):
-            raise ValueError('A learned generation controller requires Generate with a canonical conditioning NPZ')
+        if self.controller_file and (self.action != 'generate' or not (self.conditioning or self.auto_conditioning)):
+            raise ValueError('A learned generation controller requires Generate with a conditioning NPZ or automatic real-scene extraction')
         if self.action == 'train' and self.checkpoint:
             raise ValueError('First-version training starts from random initialization; pretrained loading is excluded')
         if len(set(self.methods)) != len(self.methods):
