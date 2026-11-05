@@ -47,6 +47,9 @@ class RunConfig(BaseModel):
     budget: int = Field(30, ge=6, le=5000)
     conditioning: str = ''
     auto_conditioning: bool = True
+    compare_training: bool = False
+    comparison_init_seed: int = Field(0, ge=0, le=2**31 - 1)
+    comparison_voxel_m: float = Field(.25, gt=0, le=5)
     camera_overlay: bool = True
     camera_calibration: str = ''
     camera_model: Literal['rational', 'pinhole'] = 'rational'
@@ -72,6 +75,14 @@ class RunConfig(BaseModel):
             raise ValueError('Provide the prepared split manifest path on the server')
         if self.action == 'generate' and not self.checkpoint:
             raise ValueError('Generation requires a checkpoint produced by this application')
+        if self.compare_training:
+            if self.action != 'generate' or not (self.conditioning or self.auto_conditioning):
+                raise ValueError('Training comparison requires Generate with a real conditioning scene')
+            if not self.camera_overlay:
+                raise ValueError('Training comparison requires camera overlay export')
+            if self.profile_file or self.controller_file:
+                raise ValueError('Training comparison isolates diffusion weights; leave calibration profiles and OT controllers empty')
+            self.samples_per_trace = 2
         if self.controller_file and (self.action != 'generate' or not (self.conditioning or self.auto_conditioning)):
             raise ValueError('A learned generation controller requires Generate with a conditioning NPZ or automatic real-scene extraction')
         if self.action == 'train' and self.checkpoint:

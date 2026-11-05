@@ -470,6 +470,94 @@ python -m lidarpoc.runner --request configs/prepare.json --output runs/prepare
 python -m lidarpoc.runner --request configs/train.json --output runs/train
 ```
 
+## Paired generation: without training and with training
+
+In **Generate**, enable **Compare without training / with training (one output each)**.
+Keep the detected manifest/checkpoint from a successful **Train diffusion + calibration**
+job and automatic real-scene extraction enabled. The checkpoint must record at least
+one completed training epoch. Set the sampling seed, untrained initialization seed
+and comparison voxel size, then click **Start remote job**.
+
+The job produces exactly two synthetic NPZ windows:
+
+| File | Diffusion weights |
+| --- | --- |
+| `sample_000.npz` | Fresh random initialization of the same architecture; no checkpoint weights loaded |
+| `sample_001.npz` | Weights from the selected trained checkpoint |
+
+Each file contains the checkpoint's temporal frame count; it is not one file per
+frame. Both arms use the same real conditioning, sampling seed, DDIM steps and
+geometry constraints. The untrained initialization is reproducible from its own
+seed, but is not claimed to reproduce the trained model's historical initial
+weights. Calibration profiles and learned OT controllers are bypassed in this mode
+to isolate the diffusion weights. Their saved UI fields remain available when you
+turn comparison off; existing training, RL and ordinary generation still work.
+With at least two selected GPUs, the two arms run concurrently on separate GPUs;
+with one GPU or CPU, they run sequentially. Two samples do not provide independent
+generation work for more than two GPUs. Analysis and HTML rendering run on the
+compute machine; the client receives the finished viewer through the SSH tunnel.
+
+Under **Monitor and results**, click **Open side-by-side images, point clouds and
+gap graphs**. The viewer has synchronized 3D cameras, nearby/full-scene extents,
+and a temporal-frame selector. Download the artifact ZIP to open the self-contained
+`comparison.html` offline, without access to the dataset or an internet connection.
+The two image panels are LiDAR overlays on the **same recorded camera photo**;
+the application does not generate new RGB photographs. The real camera and real
+LiDAR overlay are available as references in the viewer.
+
+All three pairs are reported: untrained versus real, trained versus real, and
+trained versus untrained. The graphs and machine-readable scores include:
+
+- Camera-pixel optical-depth MAE/RMSE/p95, return occupancy IoU and disagreement.
+- Per-pixel overlay RGB MAE maps and foreground RGB errors/histogram discrepancies.
+  The common photographic background and label strip are excluded from foreground
+  scoring. These values measure overlay differences, not synthetic RGB quality.
+- Voxel occupancy IoU, return-density differences, Jensen-Shannon distance and total
+  variation on a shared sensor-frame grid with origin `(0,0,0)`.
+- Symmetric mean nearest-neighbour distance in unsquared metres, plus range, height
+  and available intensity distributions using identical bins.
+
+Lower errors/distances are better; higher IoU is better. Missing support produces
+`null`/n/a, including depth errors with no jointly observed pixels. Maps may be
+reduced for display and point plots subsampled, but metrics use every valid return
+and full-resolution camera pixels. Jensen-Shannon is the **square root** of the
+divergence, using log base 2 (0–1), following the
+[SciPy definition](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.distance.jensenshannon.html).
+Nearest-neighbour distances use exact
+[cKDTree queries](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.query.html).
+These are descriptive discrepancies for a paired scene, not a population-level
+covariate-shift test. Conditioning masks and range clamping constrain geometry in
+both arms, so a low geometry error alone does not prove successful learning.
+
+The job stores `comparison.json`, full-resolution `comparison/maps_*.npz`,
+`comparison.html`, `real_scene.npz`, both synthetic NPZs, and matching
+`overlays/sample_000_frame_*.png` / `sample_001_frame_*.png`. The results PDF includes
+the paired metrics and their limits. Install the updated `requirements-server.txt`
+for server-side Plotly rendering. Camera provenance, timestamps and calibration
+requirements are the same as for ordinary Generate. If camera matching fails,
+point-cloud/voxel results and the viewer are retained, while the missing images and
+pixel scores are explicitly reported as unavailable.
+
+For API/CLI requests, keep `action: "generate"`, supply the manifest and trained
+checkpoint, and add `"compare_training": true`, `"auto_conditioning": true`,
+`"camera_overlay": true`, `"comparison_init_seed": 0`,
+`"comparison_voxel_m": 0.25`. Leave `profile_file` and `controller_file` empty;
+the sample count is normalized to two. Use the existing runner or `POST /jobs`.
+
+To recompute maps/viewer/PDF for an existing **paired** job without rerunning
+diffusion, run on the compute machine (or an extracted artifact folder):
+
+```bash
+python view_comparison.py runs/PAIRED_GENERATE_JOB_ID --voxel-size 0.25
+```
+
+The command requires the original paired job's `result.json`, both annotated NPZs,
+`real_scene.npz` and overlay files. It does not reinterpret two ordinary generated
+samples as an untrained/trained experiment. Regenerating camera overlays with
+`python -m lidarpoc.camera_overlay --job runs/PAIRED_GENERATE_JOB_ID` also refreshes
+the comparison outputs. After regeneration, refresh the client to reload cached
+results.
+
 ## RL method library
 
 All RL implementations live in [`lidarpoc/rl/`](lidarpoc/rl/), with an independent
@@ -609,6 +697,7 @@ Syn/
 ├── app.py                    # Streamlit client
 ├── server.py                 # Remote FastAPI service
 ├── ssh_tunnel.sh             # Client-side forwarding helper
+├── view_comparison.py        # Rebuild a paired job's metrics and offline viewer
 ├── configs/                  # Example prepare, train and experiment requests
 ├── lidarpoc/                 # Independent processing and method modules
 ├── LICENSES/                 # Captured dataset/source notices and revision evidence
@@ -629,6 +718,7 @@ files depend on the operation:
 | Prepare | `prepared/manifest.json` and per-frame numeric caches |
 | Train | `checkpoint.pt`, `training.json`, `profiles.json`, `sample_000.npz`, resource records and any fitted RL policies |
 | Generate | `real_scene.npz` when conditioned, `sample_*.npz` and provenance in `result.json` |
+| Generate with training comparison | Two annotated synthetic NPZs, camera overlays, `comparison.html`, `comparison.json`, full-resolution `comparison/maps_*.npz` |
 | Experiment | `experiments/`, `scenes/`, selection records and per-arm checkpoints/controllers |
 
 Successful Prepare, Train, Generate and Experiment jobs also save `result.pdf`
@@ -653,6 +743,7 @@ All API paths below are relative to `http://127.0.0.2:9000` on the client:
 | POST | `/jobs/{job_id}/cancel` | Stop a running job and its worker process group |
 | GET | `/jobs/{job_id}/result` | Completed result JSON |
 | GET | `/jobs/{job_id}/report` | Completed PDF report; also generates one for older JSON-only results |
+| GET | `/jobs/{job_id}/comparison` | Offline HTML viewer for a completed untrained/trained comparison |
 | GET | `/jobs/{job_id}/artifacts` | Completed artifact ZIP |
 
 ## PDF results reports
@@ -725,6 +816,10 @@ and `eval/` contains the task, temporal and decision modules.
 NVML independently of the training stack. `server.py` manages remote jobs, and
 `app.py` is a thin client. `report.py` renders JSON results to PDF independently
 of Torch, the model stack and SSH.
+`comparison.py` coordinates paired generation and analysis; `eval/spatial_gap.py`
+provides independent pixel, voxel and covariate metrics. `comparison_viewer.py`
+renders the offline viewer without model imports. `view_comparison.py` rebuilds
+the analysis from an existing paired job; it never trains or samples a model.
 
 GPU discovery/VRAM configuration and the DataParallel wrapper are adapted from
 `PINNs/gpu_optimizer.py` and `PINNs/sandbox_optimizer_lib.py`. The tunnel adapts

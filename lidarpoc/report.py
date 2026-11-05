@@ -124,6 +124,11 @@ def findings(report):
                         'Alignment is a visual check, not a geometric fidelity score.')
         elif overlays.get('status') == 'unavailable':
             text.append('Camera overlays unavailable: ' + overlays['reason'])
+        comparison = report.get('comparison')
+        if comparison:
+            text.append(f"Paired diffusion comparison: fresh initialization seed {comparison['initialization_seed']}, "
+                        f"trained checkpoint epoch {comparison['checkpoint_epoch']}, shared sampling seed {comparison['sampling_seed']}. "
+                        'Two synthetic windows; descriptive pixel/voxel discrepancies, without calibration postprocessing.')
     return text
 
 
@@ -298,6 +303,29 @@ def write_pdf(result_path, output=None):
         table(['Split', 'Trace', 'Frames', 'Source frames'],
               [[row.get(key) for key in ('split', 'sequence_id', 'frames', 'source_frames')] for row in report.get('inventory', [])],
               [60, width - 180, 60, 60])
+    if report.get('comparison'):
+        section('Untrained / trained diffusion comparison')
+        comparison = report['comparison']
+        story.append(paragraph(f"Shared voxel size: {comparison['voxel_size_m']} m. "
+                               'Pixel depth is measured in optical-camera metres on shared valid pixels. '
+                               'Chamfer is the mean of the two directed mean unsquared nearest-neighbour distances. '
+                               'JS is base-2 Jensen-Shannon distance (0-1). IoU: higher is better; errors: lower is better.'))
+        for frame in comparison['frames']:
+            section(f"Frame {frame['frame']}")
+            table(['Pair (A / B)', 'Depth MAE (m)', 'Pixel IoU', 'Chamfer (m)', 'Voxel IoU', 'Voxel JS'],
+                  [[name.replace('_vs_', ' / '), (value['pixel'] or {}).get('depth_mae_m'),
+                    (value['pixel'] or {}).get('occupancy_iou'), value['voxel']['chamfer_mean_m'],
+                    value['voxel']['occupancy_iou'], value['voxel']['js_distance']]
+                   for name, value in frame['pairs'].items()], [125, 75, 65, 75, 65, width - 405])
+            table(['Pair', 'Overlay foreground RGB MAE (0-1)', 'Shared camera pixels'],
+                  [[name, (value['overlay_rgb'] or {}).get('foreground_mae_0_1'),
+                    (value['pixel'] or {}).get('shared_pixels')] for name, value in frame['pairs'].items()])
+        story.append(paragraph('Open comparison.html for side-by-side overlays and point clouds, pixel maps, voxel maps and covariate graphs. '
+                               'Full-resolution maps are in comparison/maps_*.npz; all scores are in comparison.json.'))
+        if comparison.get('camera_diagnostic'):
+            story.append(paragraph('Camera comparison unavailable: ' + comparison['camera_diagnostic']))
+        for line in comparison['limitations']:
+            story.append(paragraph(line))
     section('Provenance and scope')
     excluded = {'preview', 'training', 'evaluations', 'development', 'compute', 'profiles', 'inventory',
                 'sensor_meta', 'session_intervals', 'selection', 'gates', 'limitations', 'task_evaluations',

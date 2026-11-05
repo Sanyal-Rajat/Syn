@@ -240,6 +240,16 @@ def report(job_id: str):
     return FileResponse(pdf_report(directory), media_type='application/pdf', filename='result.pdf')
 
 
+@app.get('/jobs/{job_id}/comparison')
+def comparison_viewer(job_id: str):
+    directory = job_dir(job_id)
+    state = json.loads((directory / 'state.json').read_text())
+    path = directory / 'comparison.html'
+    if state['status'] != 'completed' or not path.is_file():
+        raise HTTPException(409, 'Complete a paired Generate job before opening its comparison viewer')
+    return FileResponse(path, media_type='text/html')
+
+
 @app.get('/jobs/{job_id}/artifacts')
 def artifacts(job_id: str):
     path = job_dir(job_id)
@@ -250,7 +260,7 @@ def artifacts(job_id: str):
     with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as archive:
         for filename in ('request.json', 'result.json', 'result.pdf', 'dependency-lock.json', 'profiles.json', 'training.json', 'real_scene.npz',
                          'experiment_plan.json', 'selection.json', 'development.json', 'ot_reference.npz',
-                         'resources.json', 'batch_backoff.json'):
+                         'resources.json', 'batch_backoff.json', 'comparison.json', 'comparison.html'):
             if (path / filename).is_file():
                 archive.write(path / filename, filename)
         for pattern in ('*.pt', 'sample_*.npz'):
@@ -259,7 +269,7 @@ def artifacts(job_id: str):
         for file in (Path(__file__).parent / 'LICENSES').iterdir():
             if file.is_file():
                 archive.write(file, f'LICENSES/{file.name}')
-        for folder in ('experiments', 'scenes', 'overlays'):
+        for folder in ('experiments', 'scenes', 'overlays', 'comparison'):
             for file in (path / folder).rglob('*'):
                 if file.is_file() and file.resolve().is_relative_to(path.resolve()):
                     archive.write(file, str(file.relative_to(path)))

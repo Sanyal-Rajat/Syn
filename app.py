@@ -131,7 +131,7 @@ def generation_saved_path(name):
     return saved
 
 
-def generation_path_input(label, name, default='', help=None):
+def generation_path_input(label, name, default='', help=None, disabled=False):
     saved = generation_saved_path(name)
     field_key = f'{name}_field:{endpoint}'
     if not saved['manual']:
@@ -144,7 +144,7 @@ def generation_path_input(label, name, default='', help=None):
         path = st.session_state[field_key].strip()
         saved.update(path=path, manual=bool(path) if name == 'checkpoint' else True)
 
-    return st.text_input(label, key=field_key, on_change=edit, help=help).strip()
+    return st.text_input(label, key=field_key, on_change=edit, help=help, disabled=disabled).strip()
 
 
 def generation_setting(name, default):
@@ -241,6 +241,18 @@ with configure:
         defaults = latest.get('defaults', {})
         config['manifest'] = manifest_input(defaults.get('manifest', ''), generation=action == 'generate')
         setting = lambda name, default: generation_setting(name, default) if action == 'generate' else {'value': default}
+        paired = False
+        if action == 'generate':
+            paired = config['compare_training'] = st.checkbox('Compare without training / with training (one output each)',
+                **setting('compare_training', False),
+                help='A fresh random-initialized copy of the same diffusion architecture versus your trained checkpoint, using the same scene and sampling seed.')
+            if paired:
+                st.caption('Exports two synthetic NPZ windows, their recorded-camera overlays and an interactive pixel/voxel gap viewer. Calibration profiles and OT controllers are bypassed to isolate diffusion weights.')
+                a, b = st.columns(2)
+                config['comparison_init_seed'] = a.number_input('Untrained model initialization seed', 0, 2147483647,
+                    **setting('comparison_init_seed', 0))
+                config['comparison_voxel_m'] = b.number_input('Comparison voxel size (metres)', .01, 5.,
+                    step=.05, **setting('comparison_voxel_m', .25))
         left, middle, right = st.columns(3)
         available_gpus = len(health['hardware']['gpus'])
         gpu_options = setting('gpus', -1 if available_gpus else 0)
@@ -253,7 +265,11 @@ with configure:
         selected_gpus = available_gpus if config['gpus'] == -1 else config['gpus']
         st.caption(f'{selected_gpus} remote GPU(s) selected. Training uses one process per GPU; independent samples run in parallel.')
         config['sample_steps'] = middle.number_input('Sampling steps', 2, 200, **setting('sample_steps', 50))
-        config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, **setting('samples_per_trace', 4))
+        if paired:
+            config['samples_per_trace'] = 2
+            right.metric('Synthetic outputs', '2', help='One untrained and one trained NPZ, each containing the checkpoint temporal window.')
+        else:
+            config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, **setting('samples_per_trace', 4))
         config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', **setting('auto_optimize', True),
             help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
@@ -286,13 +302,18 @@ with configure:
             for name in ('batch_size', 'diffusion_steps', 'window'):
                 if name in selected_defaults:
                     config[name] = selected_defaults[name]
-            config['profile_file'] = generation_path_input('Optional calibration profiles.json on the server', 'profile_file', selected_defaults.get('profile_file', ''))
-            config['profile_name'] = generation_path_input('Calibration profile name', 'profile_name', selected_defaults.get('profile_name', 'uncalibrated'))
+            config['profile_file'] = generation_path_input('Optional calibration profiles.json on the server', 'profile_file', selected_defaults.get('profile_file', ''), disabled=paired)
+            config['profile_name'] = generation_path_input('Calibration profile name', 'profile_name', selected_defaults.get('profile_name', 'uncalibrated'), disabled=paired)
             config['controller_file'] = generation_path_input('Optional frozen OT controller.pt on the server', 'controller_file', selected_defaults.get('controller_file', ''),
-                help='Requires a canonical scene NPZ and the exact own checkpoint used to train this controller.')
-            if latest.get('training_job_id') and not config['controller_file']:
+                help='Requires a canonical scene NPZ and the exact own checkpoint used to train this controller.', disabled=paired)
+            if paired:
+                config.update(profile_file='', profile_name='uncalibrated', controller_file='')
+            if latest.get('training_job_id') and not config['controller_file'] and not paired:
                 st.caption('This training run produced no frozen OT controller; the optional controller field is empty.')
-            config['camera_overlay'] = st.checkbox('Overlay synthetic LiDAR on recorded camera images', **setting('camera_overlay', True),
+            camera_options = setting('camera_overlay', True)
+            if paired:
+                st.session_state[camera_options['key']] = True
+            config['camera_overlay'] = st.checkbox('Overlay synthetic LiDAR on recorded camera images', **camera_options, disabled=paired,
                 help='Match the conditioning trace to timestamped camera frames, export PNG comparisons, and display them in results. Unavailable inputs are reported without stopping LiDAR generation.')
             with st.expander('Camera overlay settings'):
                 config['camera_calibration'] = generation_path_input('Optional camera calibration JSON on the server', 'camera_calibration',
@@ -370,6 +391,8 @@ with configure:
         missing_inputs.append('Prepared manifest path on the server')
     if action == 'generate' and not config['checkpoint']:
         missing_inputs.append('Own checkpoint path on the server')
+    if action == 'generate' and config.get('compare_training') and not (config['conditioning'] or config['auto_conditioning']):
+        missing_inputs.append('a conditioning NPZ or automatic real-scene extraction')
     if missing_inputs:
         message = 'Start remote job is disabled: enter ' + ' and '.join(missing_inputs) + '.'
         if action == 'generate' and not config['checkpoint']:
@@ -462,6 +485,19 @@ def monitor():
             st.dataframe(report['inventory'])
         elif report['action'] == 'generate':
             st.success(f"Generated {report['samples']} LiDAR windows.")
+            comparison = report.get('comparison')
+            if comparison:
+                st.subheader('Without training / with training')
+                st.caption('Same conditioning scene and sampling seed. Overlays share a recorded RGB photo. Geometry is constrained by the conditioning rules.')
+                st.link_button('Open side-by-side images, point clouds and gap graphs', f'{endpoint}/jobs/{job_id}/comparison')
+                st.dataframe([{'frame': row['frame'], 'comparison': name,
+                    'pixel_depth_MAE_m': (values['pixel'] or {}).get('depth_mae_m'),
+                    'voxel_IoU': values['voxel']['occupancy_iou'],
+                    'Chamfer_m': values['voxel']['chamfer_mean_m'],
+                    'voxel_JS_distance': values['voxel']['js_distance']}
+                    for row in comparison['frames'] for name, values in row['pairs'].items()], hide_index=True)
+                if comparison.get('camera_diagnostic'):
+                    st.info('Camera comparison unavailable: ' + comparison['camera_diagnostic'])
             if report.get('real_scene'):
                 st.write('Real conditioning scene on the remote server:')
                 st.code(report['real_scene'])
@@ -474,9 +510,14 @@ def monitor():
                 selected = st.selectbox('Overlay frame', range(len(frames)), key=f'overlay_frame:{job_id}')
                 frame = frames[selected]
                 samples = frame['synthetic']
-                chosen = st.selectbox('Synthetic overlay sample', range(len(samples)), key=f'overlay_sample:{job_id}',
-                    format_func=lambda index: samples[index]['sample'])
-                for panel, record, label in zip(st.columns(2), (frame['real'], samples[chosen]), ('Real LiDAR', 'Synthetic LiDAR')):
+                if comparison:
+                    shown = samples
+                    labels = ['Without training', 'With training']
+                else:
+                    chosen = st.selectbox('Synthetic overlay sample', range(len(samples)), key=f'overlay_sample:{job_id}',
+                        format_func=lambda index: samples[index]['sample'])
+                    shown, labels = (frame['real'], samples[chosen]), ('Real LiDAR', 'Synthetic LiDAR')
+                for panel, record, label in zip(st.columns(2), shown, labels):
                     key = f'overlay:{cache}:{record["file"]}'
                     if key not in st.session_state:
                         st.session_state[key] = api('GET', f'/jobs/{job_id}/overlays/{record["file"]}', timeout=60).content

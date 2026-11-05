@@ -118,6 +118,8 @@ def _run(config, directory):
 
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
     validate_checkpoint(checkpoint, config.manifest)
+    if config.compare_training and int(checkpoint.get('epoch', 0)) < 1:
+        raise ValueError('Training comparison requires a checkpoint with at least one completed training epoch')
     device = 'cuda:0' if config.gpus and torch.cuda.is_available() else 'cpu'
     torch.set_num_threads(1 if device == 'cpu' else 4)
     model = LidarDMAdapter(checkpoint['config'], checkpoint['sensor_meta']).to(device)
@@ -143,7 +145,11 @@ def _run(config, directory):
         if config.sample_steps > model.config['diffusion_steps']:
             raise ValueError('Sampling steps exceed the checkpoint diffusion schedule')
         model.config['sample_steps'] = config.sample_steps
-        if config.controller_file:
+        if config.compare_training:
+            from .comparison import paired_samples
+            progress('generating untrained and trained diffusion arms')
+            generated = paired_samples(model, sampler, config, conditioning)
+        elif config.controller_file:
             from .ot.generate import controlled_generate
             generated = controlled_generate(model, config, sampler)
         else:
@@ -167,6 +173,11 @@ def _run(config, directory):
             with np.load(real_scene, allow_pickle=False) as scene:
                 sample_metadata.update({key: scene[key] for key in ('source_scan_file', 'source_frame_indices') if key in scene})
         for index, sample in enumerate(generated):
+            if config.compare_training:
+                sample['training_status'] = np.asarray(('untrained', 'trained')[index])
+                sample['sampling_seed'] = np.asarray(config.seed)
+                if index == 0:
+                    sample['initialization_seed'] = np.asarray(config.comparison_init_seed)
             np.savez_compressed(directory / f'sample_{index:03d}.npz', **sample,
                                 **sample_metadata)
         report = {'action': 'generate', 'samples': len(generated), 'checkpoint': str(checkpoint_path),
@@ -178,6 +189,15 @@ def _run(config, directory):
         report['generation_controller'] = config.controller_file or None
         from .camera_overlay import export_overlays
         report['camera_overlays'] = export_overlays(config, manifest, directory, real_scene, progress)
+        if config.compare_training:
+            from .comparison import ARMS, analyze
+            report['comparison'] = {
+                'arms': ARMS, 'sampling_seed': config.seed, 'initialization_seed': config.comparison_init_seed,
+                'checkpoint_epoch': int(checkpoint['epoch']), 'trained_checkpoint': str(checkpoint_path),
+                'baseline': 'Fresh random initialization of the same architecture; no checkpoint weights loaded. Not the historical pre-training weights.',
+            }
+            progress('computing pixel and voxel domain gaps; building comparison viewer')
+            report['comparison'] = analyze(directory, report, config.comparison_voxel_m)
         write_json(directory / 'result.json', report)
         progress('completed', 1)
         return report

@@ -51,12 +51,17 @@ def export_overlays(config, manifest, directory, real_scene, progress=lambda *ar
                     ranges, valid = data['range'][frame], data['valid'][frame].astype(bool)
                     elevations = data['elevations'] if 'elevations' in data else manifest['sensor_meta']['elevations']
                     points = unproject(ranges, valid & np.isfinite(ranges) & (ranges > 0), elevations)
+                    status = str(data['training_status'].item()) if 'training_status' in data else ''
                 real = path.resolve() == Path(real_scene).resolve()
                 label = 'Real LiDAR' if real else f'Synthetic LiDAR {path.stem}'
+                if not real and status in ('untrained', 'trained'):
+                    label = f'{status.capitalize()} diffusion LiDAR'
                 overlay, count = draw_overlay(image, points, camera, label)
                 name = f'{"real" if real else path.stem}_frame_{frame:03d}.png'
                 overlay.save(folder / name)
                 record = {'file': name, 'sample': path.name, 'projected_pixels': count}
+                if status and not real:
+                    record['training_status'] = status
                 if real:
                     row['real'] = record
                 else:
@@ -101,6 +106,9 @@ if __name__ == '__main__':
     report = json.loads(path.read_text())
     report['camera_overlays'] = export_overlays(config, load_manifest(config.manifest), args.job,
         report.get('real_scene'), lambda *values: progress(args.job, *values))
+    if report.get('comparison'):
+        from .comparison import analyze
+        report['comparison'] = analyze(args.job, report, config.comparison_voxel_m)
     write_json(path, report)
     write_pdf(path)
     print(json.dumps(report['camera_overlays'], indent=2))
