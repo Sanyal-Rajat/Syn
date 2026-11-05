@@ -1,5 +1,7 @@
 """Export a real conditioning window with enough metadata for independent viewing."""
 from pathlib import Path
+import os
+import tempfile
 
 import numpy as np
 
@@ -29,6 +31,12 @@ def export_real_scene(manifest, window, output, source=''):
                   max_range_m=np.asarray(sensor['max_range_m']))
     target = Path(output).resolve() / 'real_scene.npz'
     target.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(target, **arrays)
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix='.scene-', suffix='.npz', delete=False) as stream:
+        temporary = Path(stream.name)
+    try:
+        np.savez_compressed(temporary, **arrays)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
     get_logger().info('Exported real conditioning scene: %s; source=%s', target, origin)
     return str(target), origin

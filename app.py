@@ -119,17 +119,27 @@ def manifest_input():
                          placeholder='/data/cache/manifest.json', on_change=edit).strip()
 
 
-def checkpoint_input():
-    saved_key, field_key = (f'{name}:{endpoint}' for name in ('checkpoint_saved', 'checkpoint_field'))
-    if field_key not in st.session_state:
-        st.session_state[field_key] = st.session_state.get(saved_key, '')
+def generation_saved_path(name):
+    key = f'{name}_saved:{endpoint}'
+    saved = st.session_state.setdefault(key, {'path': '', 'manual': False})
+    if isinstance(saved, str):
+        saved = st.session_state[key] = {'path': saved, 'manual': bool(saved)}
+    return saved
+
+
+def generation_path_input(label, name, default='', help=None):
+    saved = generation_saved_path(name)
+    field_key = f'{name}_field:{endpoint}'
+    if not saved['manual']:
+        saved['path'] = default
+        st.session_state[field_key] = default
+    elif field_key not in st.session_state:
+        st.session_state[field_key] = saved['path']
 
     def edit():
-        st.session_state[saved_key] = st.session_state[field_key].strip()
+        saved.update(path=st.session_state[field_key].strip(), manual=True)
 
-    return st.text_input('Own checkpoint path on the server', key=field_key, on_change=edit,
-        help='Required: use the checkpoint path from a completed Train job result.json. '
-             'The path is remembered when switching operations. Scene NPZ files do not contain trained weights.').strip()
+    return st.text_input(label, key=field_key, on_change=edit, help=help).strip()
 
 
 try:
@@ -189,11 +199,28 @@ with configure:
         config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', value=True,
             help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
-            config['checkpoint'] = checkpoint_input()
             config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', value=True,
-                help='When no scene path is supplied, use the first complete training window, matching the checkpoint window length. Save real_scene.npz beside the synthetic samples.')
-            config['conditioning'] = st.text_input('Optional synthetic scene NPZ on the server',
-                help='Optional override: range and valid arrays [T,H,W], matching the checkpoint sensor. The supplied scene takes priority over automatic extraction.').strip()
+                help='Create or reuse the first complete training window matching the checkpoint. Fill the scene path automatically and export real_scene.npz beside the synthetic samples.')
+            if st.button('Use detected paths', help='Replace manual checkpoint and scene paths with matching server files.'):
+                for name in ('checkpoint', 'conditioning'):
+                    generation_saved_path(name).update(path='', manual=False)
+                    st.session_state[f'{name}_field:{endpoint}'] = ''
+                st.rerun()
+            detected = {}
+            if config['manifest']:
+                saved_checkpoint = generation_saved_path('checkpoint')
+                saved_scene = generation_saved_path('conditioning')
+                try:
+                    detected = api('POST', '/generation/inputs', json={'manifest': config['manifest'],
+                        'checkpoint': saved_checkpoint['path'] if saved_checkpoint['manual'] else '',
+                        'auto_conditioning': config['auto_conditioning'] and not (saved_scene['manual'] and saved_scene['path'])}).json()
+                except httpx.HTTPError as error:
+                    detail = error.response.text if isinstance(error, httpx.HTTPStatusError) else str(error)
+                    st.caption(f'Automatic input lookup unavailable; enter paths manually or update the server API. {detail}')
+            config['checkpoint'] = generation_path_input('Own checkpoint path on the server', 'checkpoint', detected.get('checkpoint', ''),
+                help='Automatically selects the latest completed training checkpoint matching this manifest. You can enter a checkpoint file or its training job directory. Manual entries are remembered across operations.')
+            config['conditioning'] = generation_path_input('Optional synthetic scene NPZ on the server', 'conditioning', detected.get('conditioning', ''),
+                help='Automatically populated with a real training window when enabled. You can override it with matching range/valid arrays [T,H,W].')
             st.caption('The real scene and synthetic samples are included in the artifact download. '
                        'To generate without conditioning, turn off automatic extraction and leave the scene path blank.')
             config['profile_file'] = st.text_input('Optional calibration profiles.json on the server')

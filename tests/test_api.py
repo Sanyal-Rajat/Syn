@@ -37,6 +37,9 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
     with TestClient(server.app) as client:
         assert client.get('/health').status_code == 200
         assert client.get('/jobs/no-such-job').status_code == 404
+        missing = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
+            'checkpoint': str(tmp_path), 'gpus': 0})
+        assert missing.status_code == 422 and 'checkpoint.pt' in missing.text
         config = {'manifest': prepared, 'gpus': 0, 'channels': 8, 'epochs': 1, 'height': 4, 'width': 16,
                   'window': 2, 'batch_size': 2, 'diffusion_steps': 10, 'sample_steps': 2,
                   'samples_per_trace': 1, 'budget': 6, 'methods': ['ppo', 'random_search']}
@@ -53,6 +56,12 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert state['status'] == 'completed', state
         report = client.get(f'/jobs/{identifier}/result').json()
         assert report['pretrained_weights_used'] is False
+        detected = client.post('/generation/inputs', json={'manifest': prepared})
+        assert detected.status_code == 200, detected.text
+        detected = detected.json()
+        assert detected['checkpoint'] == report['checkpoint']
+        assert Path(detected['conditioning']).is_file()
+        assert detected['checkpoints'][0]['job_id'] == identifier
         assert 'ppo' in report['profiles']
         output = client.get(f'/jobs/{identifier}/logs').json()
         assert 'Epoch metrics:' in output['text']
@@ -66,7 +75,7 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
         assert pdf.content.startswith(b'%PDF-')
         assert 'LICENSES/MODEL-MIT.txt' in archive.namelist()
         generation = client.post('/jobs', json={'action': 'generate', 'manifest': prepared,
-            'checkpoint': report['checkpoint'], 'gpus': 0, 'sample_steps': 2, 'samples_per_trace': 1,
+            'checkpoint': str(Path(report['checkpoint']).parent), 'gpus': 0, 'sample_steps': 2, 'samples_per_trace': 1,
             'profile_file': str(server.ROOT / identifier / 'profiles.json'), 'profile_name': 'ppo'})
         assert generation.status_code == 202, generation.text
         generation_id = generation.json()['id']
@@ -78,6 +87,7 @@ def test_remote_training_and_artifacts(prepared, tmp_path, monkeypatch, capsys):
             time.sleep(.1)
         assert state['status'] == 'completed', state
         generated = client.get(f'/jobs/{generation_id}/result').json()
+        assert generated['checkpoint'] == report['checkpoint']
         assert generated['calibration_profile'] == 'ppo'
         assert generated['conditioning_source']['split'] == 'train'
         assert generated['geometry']['new_surface_returns'] == 0

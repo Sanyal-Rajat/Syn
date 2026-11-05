@@ -70,6 +70,9 @@ def run(config, directory):
 def _run(config, directory):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
+    if config.action == 'generate':
+        from .generation_inputs import resolve_checkpoint
+        config = config.model_copy(update={'checkpoint': resolve_checkpoint(config.checkpoint)})
     if config.action != 'prepare':
         from .gpu import resolve_gpus
         config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})

@@ -17,6 +17,8 @@ def remote(monkeypatch):
             result = {'status': 'ok', 'hardware': {'gpus': [], 'physical_cpus': 4, 'available_ram_gb': 8}}
         elif path == '/dataset/prepared':
             result = []
+        elif path == '/generation/inputs':
+            result = {'checkpoint': '', 'conditioning': '', 'checkpoints': []}
         elif path == '/metrics/gpu':
             result = {'timestamp': time.time(), 'error': None, 'gpus': [
                 {'id': 0, 'name': 'Test GPU', 'uuid': 'GPU-test', 'utilization_percent': 73,
@@ -160,6 +162,63 @@ def prepared_remote(remote, monkeypatch):
 
     monkeypatch.setattr(httpx, 'request', request)
     return remote, choices
+
+
+@pytest.fixture
+def detected_remote(prepared_remote, monkeypatch):
+    submitted, choices = prepared_remote
+    original, lookups = httpx.request, []
+
+    def request(method, url, **kwargs):
+        if url.endswith('/generation/inputs'):
+            values = kwargs['json']
+            lookups.append(values)
+            version = 'new' if values['manifest'] == choices[0]['manifest'] else 'old'
+            result = {'checkpoint': values['checkpoint'] or f'/remote/{version}/train/checkpoint.pt',
+                      'conditioning': f'/remote/{version}/real_scene.npz' if values['auto_conditioning'] else '',
+                      'checkpoints': []}
+            return httpx.Response(200, json=result, request=httpx.Request(method, url))
+        return original(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, 'request', request)
+    return submitted, choices, lookups
+
+
+def test_generate_automatically_fills_matching_checkpoint_and_scene(detected_remote):
+    submitted, choices, _ = detected_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/new/train/checkpoint.pt'
+    assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == '/remote/new/real_scene.npz'
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(field for field in app.selectbox if field.label == 'Completed preparation').set_value(choices[1]['manifest']).run()
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/old/train/checkpoint.pt'
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    assert submitted[-1]['checkpoint'] == '/remote/old/train/checkpoint.pt'
+    assert submitted[-1]['conditioning'] == '/remote/old/real_scene.npz'
+
+
+def test_detected_paths_preserve_manual_overrides_and_can_be_restored(detected_remote):
+    submitted, _, lookups = detected_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('/remote/custom/checkpoint.pt').run()
+    next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').set_value('/remote/custom/scene.npz').run()
+    assert not lookups[-1]['auto_conditioning']
+    app.radio[0].set_value('Prepare Pandar128').run()
+    app.radio[0].set_value('Generate').run()
+    assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == '/remote/custom/scene.npz'
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('').run()
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(button for button in app.button if button.label == 'Use detected paths').click().run()
+    assert not app.exception
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/new/train/checkpoint.pt'
+    assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == '/remote/new/real_scene.npz'
+    next(field for field in app.checkbox if field.label == 'Automatically extract a real scene from the prepared dataset').set_value(False).run()
+    assert next(field for field in app.text_input if field.label == 'Optional synthetic scene NPZ on the server').value == ''
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert submitted[-1]['conditioning'] == '' and not submitted[-1]['auto_conditioning']
 
 
 def test_empty_manifest_disables_submission_without_hiding_monitoring(remote):

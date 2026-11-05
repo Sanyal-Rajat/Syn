@@ -92,6 +92,21 @@ def prepared():
     return prepared_manifests(ROOT)
 
 
+class GenerationInputsRequest(BaseModel):
+    manifest: str
+    checkpoint: str = ''
+    auto_conditioning: bool = True
+
+
+@app.post('/generation/inputs')
+def generation_inputs(request: GenerationInputsRequest):
+    from lidarpoc.generation_inputs import prepare_generation_inputs
+    try:
+        return prepare_generation_inputs(ROOT, request.manifest, request.checkpoint, request.auto_conditioning)
+    except (OSError, ValueError, KeyError) as error:
+        raise HTTPException(422, str(error)) from error
+
+
 class DatasetRequest(BaseModel):
     root: str = ''
 
@@ -125,6 +140,9 @@ def start(config: RunConfig):
         from lidarpoc.gpu import resolve_gpus
         try:
             load_manifest(config.manifest)
+            if config.action == 'generate':
+                from lidarpoc.generation_inputs import resolve_checkpoint
+                config = config.model_copy(update={'checkpoint': resolve_checkpoint(config.checkpoint)})
             config = config.model_copy(update={'gpus': resolve_gpus(config.gpus)})
         except (ValueError, OSError, KeyError) as error:
             raise HTTPException(422, str(error)) from error

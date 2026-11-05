@@ -271,10 +271,14 @@ surfaces to the configured tolerance. This is ray-space conditioning, not scene
 reconstruction. The original calibration metrics describe sensor-frame persistence;
 the optional OT experiment below adds pose-aware checks and a labeled task probe.
 
-**Generate** automatically extracts the first complete window from the manifest's
-**training split**, using the checkpoint's temporal window length. Leave the scene
-path blank and keep **Automatically extract a real scene from the prepared dataset**
-enabled. The job saves `real_scene.npz` alongside `sample_000.npz`, `sample_001.npz`,
+**Generate** fills the checkpoint field from the latest completed training job
+matching the selected frozen manifest. With **Automatically extract a real scene
+from the prepared dataset** enabled, it also fills the scene field with a real
+training window matching that checkpoint's frame count. The server creates or
+reuses this small scene cache under
+`datasets/conditioning/<manifest_sha256>/window_<T>/real_scene.npz`, using the
+first complete window from the **training split**. No model weights are loaded
+to populate these fields. The job saves `real_scene.npz` alongside `sample_000.npz`, `sample_001.npz`,
 and the remaining synthetic variants of that same window. No manual extraction
 script is needed. The real scene contains copied recorded LiDAR data, not newly
 generated real-world measurements or RGB images. Its original ranges, masks,
@@ -282,10 +286,13 @@ intensities, labels and timestamps are retained where available; beam metadata i
 embedded so it can be opened directly in `view_syn_npz.py`.
 
 A supplied scene path overrides automatic extraction and is also exported as
-`real_scene.npz`. To retain unconditional generation, disable automatic extraction
+`real_scene.npz`. Manual checkpoint and scene entries are remembered across
+operation changes. Click **Use detected paths** to restore automatic choices.
+To retain unconditional generation, disable automatic extraction
 and leave the scene path blank (`"auto_conditioning": false` in JSON requests).
 Automatic extraction never selects validation/test frames. The result JSON records
-the exported scene path and its source trace/frame records, and the artifact ZIP
+the exported scene path and its source (a cached/manual scene file or extracted
+training trace/frame records), and the artifact ZIP
 contains both the conditioning scene and synthetic outputs. Use the same viewer
 and frame index to compare them:
 
@@ -316,8 +323,11 @@ The export profile is chosen on validation. No downstream, commercial-release or
 cross-sensor transfer claim follows automatically from these statistics.
 
 Use **Generate** with an own `checkpoint.pt`, optionally its `profiles.json` and a
-profile name such as `ppo`. **Own checkpoint path on the server** is required:
-copy the `checkpoint` value from a completed training job's `result.json`. Prepare
+profile name such as `ppo`. **Own checkpoint path on the server** is required and
+is filled automatically when a matching completed training job is available.
+You can override it with the `checkpoint` value from a completed training job's
+`result.json`, or its job directory; the API and headless runner resolve that
+directory to `checkpoint.pt` and check that the file exists. Prepare
 creates dataset caches and a manifest; creating a scene NPZ supplies conditioning
 geometry. Neither operation trains the model. The checkpoint path is remembered
 when switching operations in the same client session. The Generate button stays
@@ -513,6 +523,7 @@ All API paths below are relative to `http://127.0.0.2:9000` on the client:
 | GET | `/metrics/gpu` | Current server GPU telemetry |
 | GET | `/dataset/prepared` | Discover completed prepared manifests |
 | POST | `/dataset/inspect` | Inspect NPZ schemas; body: `{"root":"/server/path"}` |
+| POST | `/generation/inputs` | Discover matching checkpoints and prepare/reuse a real-scene path; body: `{"manifest":"/server/manifest.json"}`, optional `checkpoint` and `auto_conditioning` |
 | POST | `/jobs` | Submit a `RunConfig` request; returns the job ID |
 | GET | `/jobs` | List recent jobs |
 | GET | `/jobs/{job_id}` | Status, progress, training metrics and recent log text |
@@ -559,6 +570,7 @@ An existing completed server job gets a PDF on its first report/artifact request
 | Explicit SSH control socket is unavailable | The `-S` path must belong to a running master. Start the reusable connection shown above, or omit `-S` to let the helper establish a managed connection. |
 | HTTP 422: missing manifest | Complete Prepare, then select its manifest from **Completed preparation**. JSON requests need the full server path to `prepared/manifest.json`. |
 | HTTP 422: generation requires a checkpoint | Enter the `checkpoint` path from the completed training job's `result.json`, using the same manifest. If training has not run, complete **Train diffusion + calibration** first. A conditioning NPZ is a scene input, not a model checkpoint. |
+| `IsADirectoryError` when loading a checkpoint | The path must name `checkpoint.pt`, for example `runs/<training_job>/checkpoint.pt`. Updated versions also accept the training job directory and resolve it automatically. Click **Use detected paths** to fill matching checkpoint and scene files. |
 | Beam inference fails its residual/spacing check | Confirm `vehicle` versus `sensor` coordinates. Supply 128 sorted measured beam elevations in degrees if inference still fails. Mounting/FOV configuration is not a beam calibration table. |
 | GPU utilization is zero during preparation | Downloading, decompression, trace decoding, beam estimation and file writes use CPU/I/O. GPU projection runs between those stages; check the processing log for the current stage. |
 | Training uses only one GPU | Keep **Remote GPUs (-1 = all, 0 = CPU)** at `-1` and automatic optimization enabled; check server-side `torch.cuda.device_count()`, `CUDA_VISIBLE_DEVICES` and rank/resource logs. A small sample bank or one ready task may not occupy every device. |

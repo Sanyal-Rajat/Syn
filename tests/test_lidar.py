@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -116,3 +117,7 @@ def test_random_diffusion_training_sampling_and_conditioning(prepared, tmp_path)
     assert not sample['valid'][~valid].any()
     assert ((sample['range'][sample['valid']] - 10.).abs() <= .10001).all()
     assert torch.isfinite(sample['range']).all()
+    generated = run(RunConfig(action='generate', manifest=prepared, checkpoint=str(output),
+        gpus=0, sample_steps=2, samples_per_trace=1), tmp_path / 'headless_generate')
+    assert generated['checkpoint'] == str(output / 'checkpoint.pt')
+    assert Path(generated['real_scene']).is_file()
