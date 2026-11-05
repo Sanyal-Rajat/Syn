@@ -355,10 +355,15 @@ space. Large object-array variants require sufficient RAM and are rejected befor
 loading if their uncompressed member exceeds 40% of available RAM.
 
 Pairing follows the publisher's [timestamp-based camera selection](https://github.com/filipberanek/lane_lines_dataset/blob/main/article_visualizations/create_videos.py):
-use the source LiDAR frame's odometry `t` and find the closest camera `t`. Camera
+use the source LiDAR frame's odometry timestamp and find the closest camera timestamp. Camera
 and LiDAR frame indices can differ. The default timestamp unit is seconds and the
-maximum difference is 50 ms; change these under **Camera overlay settings** if
-the source records use other units. Nominal prepared 20 Hz timestamps are never
+maximum difference is 50 ms. Explicit `timestamp_s`, `timestamp_ms`,
+`timestamp_us` and `timestamp_ns` fields are also supported, with their units
+applied independently to each stream. In the published variant with odometry `t`
+and camera `timestamp_us`, leave the configured unit at seconds for odometry;
+camera microseconds are converted automatically. The configured timestamp unit
+under **Camera overlay settings** applies only to generic `t` fields. The log and
+per-frame output metadata record each selected field and its unit. Nominal prepared 20 Hz timestamps are never
 used to pair images. New real/synthetic NPZ files retain `source_scan_file` and
 `source_frame_indices`; old automatic scene caches can recover this provenance
 only when their ranges and masks exactly match the first training window. An

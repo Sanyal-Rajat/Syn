@@ -10,6 +10,7 @@ import zipfile
 import numpy as np
 
 from .download import ensure_camera_files
+from ..logs import get_logger
 
 
 @contextmanager
@@ -79,18 +80,34 @@ def seconds(values, unit):
     return result
 
 
+def record_times(records, unit, path):
+    """Honour unit-bearing timestamp fields independently for each sensor stream."""
+    choices = (('t', unit), ('timestamp_s', 's'), ('timestamp_ms', 'ms'),
+               ('timestamp_us', 'us'), ('timestamp_ns', 'ns'))
+    for name, source_unit in choices:
+        try:
+            values = field(records, name)
+        except ValueError:
+            continue
+        return seconds(values, source_unit), name, source_unit
+    raise ValueError(f'{Path(path).name}: no supported timestamp field ({", ".join(name for name, _ in choices)}); '
+                     f'shape={records.shape}, dtype={records.dtype}. Frame-index matching is disabled')
+
+
 def matching_camera_frames(scan_path, indices, dataset, progress, unit='s', max_skew_ms=50, width=1280):
     from PIL import Image
 
     video_path, odom_path = ensure_camera_files(scan_path, dataset, progress)
     with read_records(odom_path) as odometry:
-        times = seconds(field(odometry, 't'), unit)
+        times, lidar_field, lidar_unit = record_times(odometry, unit, odom_path)
     indices = np.asarray(indices, dtype=int)
     if (indices < 0).any() or (indices >= len(times)).any():
         raise ValueError('Conditioning frame indices exceed the source odometry records')
     frames = []
     with read_records(video_path) as video:
-        video_times = seconds(field(video, 't'), unit)
+        video_times, camera_field, camera_unit = record_times(video, unit, video_path)
+        get_logger().info('Overlay timestamps: %s=%s (%s), %s=%s (%s)',
+                          odom_path.name, lidar_field, lidar_unit, video_path.name, camera_field, camera_unit)
         images = field(video, 'data')
         if len(images) != len(video_times):
             raise ValueError('Camera image and timestamp counts differ')
@@ -112,5 +129,7 @@ def matching_camera_frames(scan_path, indices, dataset, progress, unit='s', max_
             frames.append((image.copy(), {'source_scan': str(Path(scan_path).resolve()),
                 'source_video': str(video_path), 'source_odometry': str(odom_path),
                 'lidar_frame': int(index), 'camera_frame': nearest, 'lidar_timestamp_s': float(times[index]),
-                'camera_timestamp_s': float(video_times[nearest]), 'skew_ms': skew}))
+                'camera_timestamp_s': float(video_times[nearest]), 'skew_ms': skew,
+                'lidar_timestamp_field': lidar_field, 'lidar_timestamp_unit': lidar_unit,
+                'camera_timestamp_field': camera_field, 'camera_timestamp_unit': camera_unit}))
     return frames

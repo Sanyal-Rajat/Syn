@@ -45,14 +45,16 @@ def camera_inputs(prepared, tmp_path):
     manifest = load_manifest(prepared)
     trace = manifest['splits']['train'][0]
     scan = Path(trace['source_file'])
-    odometry = np.zeros(4, dtype=[('t', 'f8')])
+    odometry = np.zeros(4, dtype=[('t', 'f8'), ('v', 'f8'), ('yaw_rate', 'f8'), ('transformation', 'f8', (4, 4))])
     odometry['t'] = 10 + np.arange(4) * .05
     np.savez(scan.with_name(trace['sequence_id'] + '_odom_list.npz'), data=odometry)
-    camera = np.zeros(6, dtype=[('t', 'f8'), ('data', 'u1', (90, 160, 3))])
-    camera['t'] = [9.9, 9.967, 10.001, 10.034, 10.067, 10.1]
+    camera = np.zeros(6, dtype=[('data', 'O'), ('timestamp_us', '<u8')])
+    camera['timestamp_us'] = [9_900_000, 9_967_000, 10_001_000, 10_034_000, 10_067_000, 10_100_000]
     for index in range(len(camera)):
-        camera['data'][index, :, :, 0] = index * 20
-        camera['data'][index, 45:, :, 1] = 100
+        image = np.zeros((90, 160, 3), dtype='uint8')
+        image[:, :, 0] = index * 20
+        image[45:, :, 1] = 100
+        camera['data'][index] = image
     np.savez(scan.with_name(trace['sequence_id'] + '_video_list.npz'), data=camera)
     calibration = tmp_path / 'camera.json'
     calibration.write_text(json.dumps({'camera_from_sensor': [[0, -1, 0, 0], [0, 0, -1, 0], [1, 0, 0, 0], [0, 0, 0, 1]],

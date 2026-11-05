@@ -301,7 +301,8 @@ with configure:
                 config['camera_model'] = st.selectbox('Camera projection model', ['rational', 'pinhole'], **setting('camera_model', 'rational'),
                     help='Rational applies radial/tangential distortion. Pinhole is for rectified images with matching rectified intrinsics.')
                 config['camera_timestamp_unit'] = st.selectbox('Source camera/odometry timestamp unit', ['s', 'ms', 'us', 'ns'],
-                    **setting('camera_timestamp_unit', 's'))
+                    **setting('camera_timestamp_unit', 's'),
+                    help='Applies to generic t fields. Explicit timestamp_s/ms/us/ns fields use their own units automatically. For Pandar128 odometry t and video timestamp_us, leave this at s.')
                 config['camera_max_skew_ms'] = st.number_input('Maximum camera time difference (ms)', 1., 1000.,
                     **setting('camera_max_skew_ms', 50.))
         else:

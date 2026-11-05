@@ -66,6 +66,7 @@ def export_overlays(config, manifest, directory, real_scene, progress=lambda *ar
         report = {'status': 'completed', 'background': 'recorded RGB; only LiDAR is synthetic',
                   'calibration_source': str(camera_path), 'calibration_convention': camera['convention'],
                   'distortion_model': camera['model'], 'timestamp_unit': config.camera_timestamp_unit,
+                  'timestamp_unit_policy': 'Explicit timestamp_s/ms/us/ns fields use their named units; the configured unit applies to t.',
                   'max_skew_ms': config.camera_max_skew_ms, 'frames': rows,
                   'limitations': 'Nearest timestamp, no motion/rolling-shutter compensation; nearest return per pixel is not full RGB occlusion handling.'}
         write_json(folder / 'manifest.json', report)

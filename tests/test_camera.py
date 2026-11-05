@@ -10,7 +10,7 @@ import pytest
 from lidarpoc.camera import draw_overlay, load_camera, project_points
 from lidarpoc.camera_overlay import export_overlays
 from lidarpoc.config import RunConfig
-from lidarpoc.data.camera import matching_camera_frames, read_records
+from lidarpoc.data.camera import matching_camera_frames, read_records, record_times
 from lidarpoc.data.conditioning import export_real_scene
 from lidarpoc.data.download import ensure_camera_files
 from lidarpoc.data.split_manifest import load_manifest
@@ -84,12 +84,38 @@ def test_timestamp_matching_uses_odometry_clock_and_rejects_skew(camera_inputs):
     assert [row['camera_frame'] for image, row in frames] == [2, 3]
     assert frames[0][0].getpixel((0, 0)) == (40, 0, 0)
     assert frames[1][1]['skew_ms'] == pytest.approx(16)
+    assert frames[0][1]['lidar_timestamp_field'] == 't' and frames[0][1]['lidar_timestamp_unit'] == 's'
+    assert frames[0][1]['camera_timestamp_field'] == 'timestamp_us' and frames[0][1]['camera_timestamp_unit'] == 'us'
     with pytest.raises(ValueError, match='timestamp mismatch'):
         matching_camera_frames(scan, [0, 1], license_gate()['dataset'], lambda *_: None, max_skew_ms=2)
     odom = scan.with_name(scan.name.replace('_scan_list', '_odom_list'))
     np.savez(odom, data=np.zeros(4, dtype=[('transformation', 'f8', (4, 4))]))
-    with pytest.raises(ValueError, match="'t' field"):
+    with pytest.raises(ValueError, match='odom_list.npz: no supported timestamp field'):
         matching_camera_frames(scan, [0], license_gate()['dataset'], lambda *_: None)
+
+
+@pytest.mark.parametrize('name,source_unit,multiplier', [('t', 'ms', 1000), ('timestamp_s', 's', 1),
+    ('timestamp_ms', 'ms', 1000), ('timestamp_us', 'us', 1_000_000), ('timestamp_ns', 'ns', 1_000_000_000)])
+def test_timestamp_units_are_taken_from_each_field_name(name, source_unit, multiplier):
+    records = np.zeros(2, dtype=[(name, 'f8')])
+    records[name] = np.array([10, 10.05]) * multiplier
+    # Only generic t uses the configured unit; explicit suffixes override it.
+    times, field_name, unit = record_times(records, 'ms', 'camera.npz')
+    np.testing.assert_allclose(times, [10, 10.05])
+    assert (field_name, unit) == (name, source_unit)
+
+
+def test_existing_generic_camera_timestamps_remain_supported(camera_inputs):
+    scan, _ = camera_inputs
+    path = scan.with_name(scan.name.replace('_scan_list', '_video_list'))
+    with np.load(path, allow_pickle=True) as source:
+        original = source['data']
+    records = np.zeros(len(original), dtype=[('t', 'f8'), ('data', 'O')])
+    records['t'], records['data'] = original['timestamp_us'] * 1e-6, original['data']
+    np.savez(path, data=records)
+    frames = matching_camera_frames(scan, [0, 1], license_gate()['dataset'], lambda *_: None)
+    assert [row['camera_frame'] for _, row in frames] == [2, 3]
+    assert frames[1][1]['skew_ms'] == pytest.approx(16)
 
 
 def test_camera_extraction_uses_only_matching_trace_and_reuses_files(tmp_path, monkeypatch):
