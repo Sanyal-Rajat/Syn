@@ -319,8 +319,11 @@ Use **Generate** with an own `checkpoint.pt`, optionally its `profiles.json` and
 profile name such as `ppo`. **Own checkpoint path on the server** is required:
 copy the `checkpoint` value from a completed training job's `result.json`. Prepare
 creates dataset caches and a manifest; creating a scene NPZ supplies conditioning
-geometry. Neither operation trains the model. The Generate button stays disabled
-until both the prepared manifest and checkpoint paths are filled in. If no trained
+geometry. Neither operation trains the model. The checkpoint path is remembered
+when switching operations in the same client session. The Generate button stays
+disabled until both the prepared manifest and checkpoint paths are filled in;
+a message beside the button identifies the missing fields. Automatic real-scene
+extraction does not remove the checkpoint requirement. If no trained
 checkpoint exists, run **Train diffusion + calibration** with the selected manifest
 first. Exports include checkpoint provenance, runtime dependency
 lock, notices, fitted RL policies, calibrated profiles, metrics and numeric sample NPZ files.

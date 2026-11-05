@@ -119,6 +119,19 @@ def manifest_input():
                          placeholder='/data/cache/manifest.json', on_change=edit).strip()
 
 
+def checkpoint_input():
+    saved_key, field_key = (f'{name}:{endpoint}' for name in ('checkpoint_saved', 'checkpoint_field'))
+    if field_key not in st.session_state:
+        st.session_state[field_key] = st.session_state.get(saved_key, '')
+
+    def edit():
+        st.session_state[saved_key] = st.session_state[field_key].strip()
+
+    return st.text_input('Own checkpoint path on the server', key=field_key, on_change=edit,
+        help='Required: use the checkpoint path from a completed Train job result.json. '
+             'The path is remembered when switching operations. Scene NPZ files do not contain trained weights.').strip()
+
+
 try:
     health = api('GET', '/health').json()
 except httpx.HTTPError:
@@ -176,12 +189,7 @@ with configure:
         config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', value=True,
             help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
         if action == 'generate':
-            config['checkpoint'] = st.text_input('Own checkpoint path on the server',
-                help='Required: use the checkpoint path from a completed Train job result.json. Preparation and scene NPZ files do not contain trained model weights.').strip()
-            if not config['checkpoint']:
-                st.info('Generation requires a trained checkpoint. Complete Train diffusion + calibration with this manifest, '
-                        'then enter the checkpoint path from that training job\'s result.json. '
-                        'A scene NPZ provides geometry; it does not replace the trained model.')
+            config['checkpoint'] = checkpoint_input()
             config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', value=True,
                 help='When no scene path is supplied, use the first complete training window, matching the checkpoint window length. Save real_scene.npz beside the synthetic samples.')
             config['conditioning'] = st.text_input('Optional synthetic scene NPZ on the server',
@@ -252,10 +260,18 @@ with configure:
                 config['experiment']['label_budgets'] = json_setting('Real label budgets (JSON)', [512, 2048])
                 for split, key in [('Training', 'scene_files'), ('Development', 'development_scene_files'), ('Test', 'test_scene_files')]:
                     config['experiment'][key] = [line.strip() for line in st.text_area(f'{split} canonical NPZ paths on server (one per line)').splitlines() if line.strip()]
-    can_start = action == 'prepare' or bool(config['manifest'])
-    if action == 'generate':
-        can_start = can_start and bool(config['checkpoint'])
-    if st.button('Start remote job', type='primary', disabled=not can_start):
+    missing_inputs = []
+    if action != 'prepare' and not config['manifest']:
+        missing_inputs.append('Prepared manifest path on the server')
+    if action == 'generate' and not config['checkpoint']:
+        missing_inputs.append('Own checkpoint path on the server')
+    if missing_inputs:
+        message = 'Start remote job is disabled: enter ' + ' and '.join(missing_inputs) + '.'
+        if action == 'generate' and not config['checkpoint']:
+            message += (' Generation requires a trained checkpoint from a completed Train job result.json. '
+                        'Automatic real-scene extraction supplies geometry; it does not train the model.')
+        st.info(message)
+    if st.button('Start remote job', type='primary', disabled=bool(missing_inputs)):
         try:
             state = api('POST', '/jobs', json=config).json()
             st.session_state['job_id'] = state['id']

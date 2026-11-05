@@ -169,6 +169,7 @@ def test_empty_manifest_disables_submission_without_hiding_monitoring(remote):
     assert next(button for button in app.button if button.label == 'Start remote job').disabled
     assert not remote
     assert any('Complete Prepare Pandar128' in message.value for message in app.info)
+    assert any('Start remote job is disabled: enter Prepared manifest path on the server.' in message.value for message in app.info)
     assert len(app.get('vega_lite_chart')) + len(app.get('arrow_vega_lite_chart')) == 2
 
 
@@ -185,6 +186,7 @@ def test_generate_requires_checkpoint_even_with_manifest_and_scene(remote, check
     assert next(button for button in app.button if button.label == 'Start remote job').disabled
     assert not remote
     assert any('Generation requires a trained checkpoint' in message.value for message in app.info)
+    assert any(message.value.startswith('Start remote job is disabled: enter Own checkpoint path on the server.') for message in app.info)
     assert len(app.get('vega_lite_chart')) + len(app.get('arrow_vega_lite_chart')) == 2
     next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value(' /remote/train/checkpoint.pt ').run()
     assert not next(button for button in app.button if button.label == 'Start remote job').disabled
@@ -207,6 +209,39 @@ def test_generate_supports_automatic_real_scene_and_unconditional_opt_out(remote
     assert not app.exception
     assert remote[-1]['auto_conditioning'] is automatic
     assert remote[-1]['conditioning'] == ''
+
+
+def test_generate_keeps_checkpoint_when_switching_operations(prepared_remote):
+    submitted, _ = prepared_remote
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('/remote/train/checkpoint.pt').run()
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
+    app.radio[0].set_value('Train diffusion + calibration').run()
+    app.radio[0].set_value('Prepare Pandar128').run()
+    app.radio[0].set_value('Generate').run()
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == '/remote/train/checkpoint.pt'
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(button for button in app.button if button.label == 'Start remote job').click().run()
+    assert not app.exception
+    assert submitted[-1]['checkpoint'] == '/remote/train/checkpoint.pt'
+
+
+def test_checkpoint_can_be_entered_before_manifest_and_explicitly_cleared(remote):
+    app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / 'app.py')).run(timeout=20)
+    app.radio[0].set_value('Generate').run()
+    assert any(message.value.startswith('Start remote job is disabled: enter Prepared manifest path on the server and Own checkpoint path on the server.') for message in app.info)
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value(' /remote/checkpoint.pt ').run()
+    assert any(message.value == 'Start remote job is disabled: enter Prepared manifest path on the server.' for message in app.info)
+    next(field for field in app.text_input if field.label == 'Prepared manifest path on the server').set_value('/remote/manifest.json').run()
+    assert not next(button for button in app.button if button.label == 'Start remote job').disabled
+    next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').set_value('   ').run()
+    app.radio[0].set_value('Prepare Pandar128').run()
+    app.radio[0].set_value('Generate').run()
+    assert not app.exception
+    assert next(field for field in app.text_input if field.label == 'Own checkpoint path on the server').value == ''
+    assert next(button for button in app.button if button.label == 'Start remote job').disabled
+    assert not remote
 
 
 def test_experiment_automatically_uses_latest_completed_preparation(prepared_remote):
