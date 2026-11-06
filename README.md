@@ -125,7 +125,8 @@ resolution and can be enlarged in Streamlit. There is no frame dropdown hiding
 other images. Additional saved synthetic images are also displayed with neutral
 labels.
 
-The page contains exactly two summary charts:
+The page displays two native interactive summary charts above the images, with
+numeric labels and hover details:
 
 - **Scan overlap with the real recording:** shared LiDAR range-grid occupancy
   divided by union occupancy, pooled across frames valid for both arms, expressed
@@ -139,8 +140,10 @@ The page contains exactly two summary charts:
 
 Both charts show the real reference as context (100% overlap and zero W1). Their
 captions identify how many frames contributed. The explanation follows the measured
-result even when the trained arm is worse. Missing scores produce a clear message
-and no fabricated graph. Camera backgrounds are identified as recorded photos;
+result even when the trained arm is worse. Ordinary Generate results also show
+their available graphs, labelled **Synthetic scan 1**, **Synthetic scan 2**, etc.;
+an ordinary run is never presented as an untrained/trained comparison. Missing
+scores produce a clear message and no fabricated graph. Camera backgrounds are identified as recorded photos;
 the coloured laser points are synthetic. Both arms are conditioned on the same
 scene, so these two measures alone do not establish overall generation quality.
 
@@ -157,9 +160,12 @@ server connection or model dependencies:
 LIDARPOC_RESULTS=/home/r/lidarpoc streamlit run app_simple.py --server.address 127.0.0.1 --server.port 9000
 ```
 
-The folder needs `result.json` and `overlays/`. Choose **Downloaded folder** in the
+The folder needs `result.json` and `overlays/`. If the result JSON has no embedded
+pixel analysis, the viewer also reads a saved `pixel_graphs.json` in that folder.
+Older paired reports can supply scan overlap from `comparison.frames`; Wasserstein
+still requires saved transport measurements. Choose **Downloaded folder** in the
 sidebar to switch manually. **Prepare a shareable summary** embeds all available
-images and the two charts in one downloadable HTML file for offline sharing. The
+images and charts in one downloadable HTML file for offline sharing. The
 client uses only `requirements-client.txt`; it does not require Torch or POT.
 `lidarpoc/presentation.py` keeps score aggregation, labels and HTML/SVG rendering
 separate from the Streamlit entry point. API/remote compute code is unchanged.

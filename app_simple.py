@@ -7,12 +7,12 @@ from urllib.parse import quote
 import httpx
 import streamlit as st
 
-from lidarpoc.presentation import chart, gallery, image_name, overlap_text, share_html, summary
+from lidarpoc.presentation import chart_spec, gallery, image_name, overlap_text, share_html, summary
 
 st.set_page_config(page_title='See what training changes', layout='wide')
 st.markdown('<style>.block-container{max-width:1500px;padding-top:2rem}</style>', unsafe_allow_html=True)
 st.title('See what training changes')
-st.write('Compare the untrained and trained versions on the same scene.')
+st.write('Compare synthetic scans with the same real recording.')
 st.caption('Photos are recorded. The coloured laser points are synthetic.')
 
 
@@ -83,29 +83,40 @@ if not isinstance(report, dict) or report.get('action') != 'generate':
     st.info('Choose a completed scene-generation result.')
     st.stop()
 
+if source == 'Downloaded folder' and not report.get('pixel_analysis', {}).get('frames'):
+    analysis_path = directory / 'pixel_graphs.json'
+    if analysis_path.is_file():
+        try:
+            report = {**report, 'pixel_analysis': json.loads(analysis_path.read_text())}
+            identity += (analysis_path.stat().st_mtime_ns,)
+        except (OSError, ValueError) as error:
+            st.warning('Saved graph measurements could not be opened: ' + str(error))
+
 data = summary(report)
-if data['paired']:
-    st.write(overlap_text(data))
-    if data['overlap']:
-        st.image(chart(data['overlap'], 'Scan overlap with the real recording', '%', True))
-        st.caption(f"Based on {data['overlap_frames']} of {data['frame_count']} frames. Higher means more shared laser-return pixels; it is not a photo-quality score.")
-    else:
-        st.info('Scan-overlap measurements are missing. Refresh this run’s analysis in the technical app.')
-    if data['wasserstein']:
-        st.image(chart(data['wasserstein'], 'Distance-distribution difference (Wasserstein-1)', 'm'))
-        st.caption(f"Based on {data['wasserstein_frames']} of {data['frame_count']} frames. A smaller bar means the spread of measured distances is closer to the real recording. Each frame is counted equally.")
-    else:
-        st.info('The Wasserstein measurement is missing. Use Build / refresh pixel and OT graphs in the technical app.')
-    with st.expander('What do the two charts mean?'):
-        st.write('Scan overlap compares which laser-return pixels are present. A value of 100% means the same occupied scan pixels. '
-                 'Wasserstein-1 compares the distributions of measured distances in metres, using all valid values. '
-                 'The first chart pools scan pixels across shared valid frames; the second averages per-frame distances. '
-                 'The real reference is 100% overlap and zero distance from itself. '
-                 'Both synthetic versions use the same scene geometry, so these charts describe two aspects of the scan rather than overall photographic realism.')
-else:
-    st.info('This result does not contain a verified untrained/trained pair. Its available images are shown below.')
+st.subheader('Comparison graphs')
+st.write(overlap_text(data))
+if not data['paired']:
+    st.info('This result has no verified untrained/trained pair. Available graphs compare each synthetic scan with the real recording.')
     with st.expander('Choose a result with both versions'):
         st.write('In app.py, generate a run with Compare without training / with training enabled, then select that completed result here.')
+if data['overlap']:
+    st.vega_lite_chart(chart_spec(data['overlap'], 'Scan overlap with the real recording', '%', True),
+                       use_container_width=True)
+    st.caption(f"Based on {data['overlap_frames']} of {data['frame_count']} frames. Higher means more shared laser-return pixels; it is not a photo-quality score.")
+else:
+    st.info('Scan-overlap measurements are missing. Refresh this run’s analysis in the technical app.')
+if data['wasserstein']:
+    st.vega_lite_chart(chart_spec(data['wasserstein'], 'Distance-distribution difference (Wasserstein-1)', 'm'),
+                       use_container_width=True)
+    st.caption(f"Based on {data['wasserstein_frames']} of {data['frame_count']} frames. A smaller bar means the spread of measured distances is closer to the real recording. Each frame is counted equally.")
+else:
+    st.info('The Wasserstein measurement is missing. Use Build / refresh pixel and OT graphs in the technical app.')
+with st.expander('What do the two charts mean?'):
+    st.write('Scan overlap compares which laser-return pixels are present. A value of 100% means the same occupied scan pixels. '
+             'Wasserstein-1 compares the distributions of measured distances in metres, using all valid values. '
+             'The first chart pools scan pixels across shared valid frames; the second averages per-frame distances. '
+             'The real reference is 100% overlap and zero distance from itself. '
+             'The synthetic scans use the same conditioning scene, so these charts describe two aspects of the scan rather than overall photographic realism.')
 
 frames = gallery(report)
 if not frames:
@@ -132,7 +143,7 @@ for index, frame in enumerate(frames, 1):
                 with panel.expander('Details'):
                     st.text(str(error))
 
-if frames:
+if frames or data['overlap'] or data['wasserstein']:
     if st.button('Prepare a shareable summary'):
         st.session_state['simple_share'] = (identity, share_html(report, data, frames))
     prepared = st.session_state.get('simple_share')
