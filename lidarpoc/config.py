@@ -25,7 +25,7 @@ class RunConfig(BaseModel):
     max_frames: int = Field(128, ge=2, le=100000)
     window: int = Field(2, ge=1, le=5)
     channels: int = Field(32, ge=8, le=128)
-    batch_size: int = Field(512, ge=1, le=4096)
+    batch_size: int = Field(0, ge=0, description='0 chooses batches automatically; positive values provide an API override')
     auto_optimize: bool = True
     epochs: int = Field(5, ge=1, le=10000)
     lr: float = Field(1e-4, gt=0, le=.01)

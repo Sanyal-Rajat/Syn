@@ -71,6 +71,7 @@ def generation_defaults(run):
     values = RunConfig(action='generate', manifest=run['manifest'], checkpoint=run['checkpoint'],
                        **{name: run['request'][name] for name in names if name in run['request']}).model_dump()
     defaults = {name: values[name] for name in names}
+    defaults['batch_size'] = 0  # Re-evaluate memory instead of inheriting an old training ceiling.
     defaults.update(manifest=run['manifest'], checkpoint=run['checkpoint'], conditioning='',
                     profile_file='', profile_name='uncalibrated', controller_file='')
     controller = run['result'].get('generation_controller')

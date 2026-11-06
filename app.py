@@ -270,8 +270,13 @@ with configure:
             right.metric('Synthetic outputs', '2', help='One untrained and one trained NPZ, each containing the checkpoint temporal window.')
         else:
             config['samples_per_trace'] = right.number_input('Evaluation windows per trace / generated samples', 1, 100, **setting('samples_per_trace', 4))
-        config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', **setting('auto_optimize', True),
-            help='Measure training batches and adapt inference batches. Jobs are scheduled across the selected GPUs automatically.')
+        config['batch_size'] = 0
+        if action == 'generate':
+            config['auto_optimize'] = st.checkbox('Automatically optimize GPU throughput', **setting('auto_optimize', True),
+                help='Adapt inference batches to measured throughput and available GPU memory.')
+        else:
+            config['auto_optimize'] = True
+            st.caption('Training batch size is selected automatically from the data, available GPU memory and measured speed.')
         if action == 'generate':
             config['auto_conditioning'] = st.checkbox('Automatically extract a real scene from the prepared dataset', **setting('auto_conditioning', True),
                 help='Create or reuse the first complete training window matching the checkpoint. Fill the scene path automatically and export real_scene.npz beside the synthetic samples.')
@@ -299,7 +304,7 @@ with configure:
             st.caption('The real scene and synthetic samples are included in the artifact download. '
                        'To generate without conditioning, turn off automatic extraction and leave the scene path blank.')
             selected_defaults = detected.get('defaults', {})
-            for name in ('batch_size', 'diffusion_steps', 'window'):
+            for name in ('diffusion_steps', 'window'):
                 if name in selected_defaults:
                     config[name] = selected_defaults[name]
             config['profile_file'] = generation_path_input('Optional calibration profiles.json on the server', 'profile_file', selected_defaults.get('profile_file', ''), disabled=paired)
@@ -327,11 +332,8 @@ with configure:
                 config['camera_max_skew_ms'] = st.number_input('Maximum camera time difference (ms)', 1., 1000.,
                     **setting('camera_max_skew_ms', 50.))
         else:
-            left, middle, right = st.columns(3)
+            left, right = st.columns(2)
             config['epochs'] = left.number_input('Epochs', 1, 10000, 5)
-            config['batch_size'] = middle.number_input('Batch size limit per GPU' if config['auto_optimize'] else 'Batch size per GPU',
-                1, 4096, 512 if config['auto_optimize'] else 8,
-                help='Automatic mode measures throughput up to this limit and keeps memory headroom.')
             config['window'] = right.number_input('Frames per temporal window', 1, 5, 2)
             config['rl_enabled'] = st.checkbox('Run RL calibration and optimizer comparisons' if action == 'train' else 'Enable experimental RL controllers', value=True)
             if action == 'train':
@@ -354,7 +356,7 @@ with configure:
                     'value_min': st.number_input('C51 minimum return support', -10000., 10000., -20.),
                     'value_max': st.number_input('C51 maximum return support', -10000., 10000., 20.),
                 }
-            st.caption(f"{'Maximum' if config['auto_optimize'] else 'Effective'} training batch: {config['batch_size'] * max(1, selected_gpus) * config['gradient_accumulation']} windows per optimizer step. Actual tuned batches appear in the logs.")
+            st.caption('The selected batch per GPU and total batch per update appear in the processing logs and results.')
         config['seed'] = st.number_input('Seed', 0, 2147483647, **setting('seed', 0))
         if action == 'experiment':
             st.caption('Adds E0–E5 experiments. All choices freeze on development data before final real test arrays are decoded.')

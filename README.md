@@ -325,7 +325,7 @@ apply to UI submissions and JSON requests:
 | --- | --- | --- |
 | `gpus` | `-1` | All GPUs visible to the server; `0` selects CPU, a positive value limits the count. |
 | `auto_optimize` | `true` | Tune training and sampling batches for measured throughput and available VRAM. |
-| `batch_size` | `512` | Per-GPU batch ceiling while tuning; fixed requested batch when tuning is disabled. |
+| `batch_size` | `0` | Automatic, without a fixed per-GPU ceiling. Positive JSON/API values remain available as a tuning ceiling, or as a fixed request with `auto_optimize=false`. |
 | `workers` | `-1` | Choose training data-loader workers automatically; `0` loads inline. |
 | `gradient_accumulation` | `1` | Number of microbatches per optimizer update. |
 | `rl_enabled` | `true` | Keep calibration methods, including PPO, enabled for the original Train workflow. |
@@ -339,21 +339,33 @@ AMP, fused CUDA AdamW, TF32 on supported GPUs, pinned transfers, prefetching and
 workers reduce stalls. `workers=-1` chooses workers from the CPU affinity and GPU
 count; `workers=0` keeps loading in the training process. CPU automatic mode uses
 no loader subprocesses. Accumulation synchronizes gradients on optimizer updates.
-Automatic optimization is enabled by default. Training measures candidate batches
-up to the configured limit (512 by default), selecting useful throughput with
-15% memory headroom and room for AdamW state. DDP ranks agree on a batch that fits
-every assigned GPU. Probing preserves RNG state and does not update model weights.
-A runtime CUDA OOM restarts only the failed training job with a smaller limit;
-dependency errors and model-allocation failures are not retried. Effective batch
-is selected batch × processes × accumulation. Disable **Automatically optimize
-GPU throughput** to choose a fixed batch. Logs identify each rank,
-device, effective batch and data workers; checkpoints record the resolved resources.
+Training and experiment forms always choose batch sizes automatically; there is
+no batch-size field or training tuning switch. Each job measures its actual
+window dimensions and bytes, the number of windows per GPU, available host RAM
+and prefetched data copies. It then benchmarks forward/backward batches on every
+assigned GPU, including the enabled OT losses, and selects the fastest measured
+batch within the memory budget. There is no fixed 512-window ceiling. The budget
+keeps 15% memory headroom and reserves AdamW state and distributed communication
+buffers. DDP ranks use the smallest selected batch so synchronized updates fit
+every assigned GPU. The search runs again for each training job, accounting for
+its data and current free memory; CPU automatic mode bounds batches to eight.
+
+This adapts PINNs' memory probing and precision selection rather than its fixed
+per-sample memory estimate or forced minimum batch. Probing preserves RNG state
+and does not update model weights. A runtime CUDA OOM restarts only the failed
+training job with a smaller measured limit; dependency errors and model-allocation
+failures are not retried. Effective batch is selected batch × processes ×
+accumulation. Client/server processing logs show each probe and the selected batch.
+`resources.json` and checkpoints record the data bounds, per-rank probes, memory
+budgets and effective batch. Programmatic requests can still set a positive
+`batch_size` override; `batch_size=0` always requests automatic training selection.
 
 Independent generated samples also run concurrently with CUDA AMP on one model replica per
 selected GPU, preserving sample order and individual seeds. The replicas are reused
 across calibration and evaluation banks. A shared queue lets faster GPUs take more
 work. Compatible requests are batched with independent seeds; observed throughput
-and free memory guide batch growth. An OOM halves the batch and retries those same
+and free memory guide batch growth, bounded by pending work rather than the old
+training ceiling. An OOM halves the batch and retries those same
 seeds. Small banks use only as many GPUs as there are samples. Changing batch size
 or AMP can change floating-point rounding.
 

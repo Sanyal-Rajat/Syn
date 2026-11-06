@@ -19,7 +19,7 @@ class SamplingPool:
         self.capacity = [1] * len(self.devices)
         self.rates = [0.] * len(self.devices)
         self.best_batch = [1] * len(self.devices)
-        self.ceiling = [getattr(model, 'config', {}).get('batch_size', 512)] * len(self.devices)
+        self.ceiling = [None] * len(self.devices)
 
     @staticmethod
     def combine(requests):
@@ -48,7 +48,7 @@ class SamplingPool:
             dtype = torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float16
             automatic = (device.type == 'cuda' and getattr(model, 'supports_seed_batch', False)
                          and model.config.get('auto_optimize', True))
-            limit = min(model.config.get('batch_size', 512), self.ceiling[rank]) if automatic else 1
+            limit = min(model.config.get('batch_size') or total, self.ceiling[rank] or total, total) if automatic else 1
             while True:
                 with lock:
                     if not pending:
@@ -75,7 +75,7 @@ class SamplingPool:
                 except torch.cuda.OutOfMemoryError:
                     if size == 1:
                         raise
-                    limit = self.ceiling[rank] = min(limit, size - 1)
+                    limit = self.ceiling[rank] = min(limit, max(1, size // 2))
                     self.capacity[rank] = max(1, min(limit, self.best_batch[rank]))
                     with lock:
                         pending.extendleft(reversed(chunk))

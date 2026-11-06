@@ -19,6 +19,7 @@ from .logs import get_logger, progress
 from .models.lidardm_adapter import LidarDMAdapter
 from .provenance import license_gate, provenance, validate_checkpoint
 from .data.split_manifest import digest
+from .tuning import batch_limit, search_batch
 
 
 class RangeDataset(Dataset):
@@ -70,9 +71,10 @@ def train(config, output):
         torch.backends.cudnn.benchmark = True
         if torch.cuda.get_device_capability(device)[0] >= 8:
             torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
     if distributed:
         torch.distributed.init_process_group('nccl' if device.type == 'cuda' else 'gloo')
-    batch_size = config.batch_size
+    batch_size = config.batch_size or 1
     phase = 'setup'
     try:
         torch.manual_seed(config.seed)
@@ -89,10 +91,11 @@ def train(config, output):
         validation_data = RangeDataset(manifest, 'validation', config.window)
         sampler = DistributedSampler(train_data, shuffle=True, seed=config.seed) if distributed else None
         resources = auto_configure_training('cpu' if config.gpus == 0 else 'auto', workers=max(1, config.gpus))
-        batch_size = min(config.batch_size, resources['estimated_batch_capacity'])
-        if config.auto_optimize and device.type == 'cpu':
-            batch_size = min(batch_size, 8)
         workers = loader_workers(config.workers, 2 * world_size) if device.type == 'cuda' else max(0, config.workers)
+        limit, tuning = batch_limit(collate([train_data[0]]), len(sampler) if sampler else len(train_data),
+                                    workers, world_size, config.batch_size)
+        automatic = config.auto_optimize or config.batch_size == 0
+        batch_size = min(limit, 8) if automatic and device.type == 'cpu' else limit
         loader_options = {'num_workers': workers, 'pin_memory': device.type == 'cuda'}
         if workers:
             loader_options.update(persistent_workers=True, prefetch_factor=2, multiprocessing_context='spawn')
@@ -110,22 +113,29 @@ def train(config, output):
         dtype = torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float16
         autocast = lambda: torch.autocast('cuda', dtype=dtype) if device.type == 'cuda' else nullcontext()
         phase = 'batch_tuning'
-        if config.auto_optimize and device.type == 'cuda':
-            from .tuning import search_batch
-
+        if automatic and device.type == 'cuda':
+            torch.cuda.empty_cache()
             free, _ = torch.cuda.mem_get_info(device)
-            optimizer_bytes = sum(p.numel() * p.element_size() * 2 for p in model.parameters())
-            memory_budget = .85 * (free + torch.cuda.memory_allocated(device)) - optimizer_bytes
+            parameter_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+            optimizer_bytes = 2 * parameter_bytes
+            distributed_bytes = parameter_bytes + 64 * 1024**2 if distributed else 0
+            memory_budget = .85 * (free + torch.cuda.memory_allocated(device)) - optimizer_bytes - distributed_bytes
+            tuning.update(free_gpu_memory_bytes=free, memory_budget_bytes=memory_budget, optimizer_reserve_bytes=optimizer_bytes,
+                          distributed_reserve_bytes=distributed_bytes)
+            get_logger().info('Rank %d batch tuning: window=%s, %d available windows, search up to %d, free GPU memory %.2f GiB',
+                              rank, tuning['window_shape'], tuning['windows_per_rank'], limit, free / 1024**3)
 
             def probe(size):
                 elapsed, peak = 0., 0
+                batch = loss = None
                 try:
                     with torch.random.fork_rng(devices=[device.index]):
+                        batch = to_device(collate([train_data[index * len(train_data) // size]
+                                                   for index in range(size)]), device)
                         for repeat in range(2):
                             model.zero_grad(set_to_none=True)
+                            loss = None
                             torch.cuda.reset_peak_memory_stats(device)
-                            batch = to_device(collate([train_data[index * len(train_data) // size]
-                                                       for index in range(size)]), device)
                             torch.cuda.synchronize(device)
                             started = time.perf_counter()
                             with autocast():
@@ -137,21 +147,30 @@ def train(config, output):
                             peak = max(peak, torch.cuda.max_memory_allocated(device))
                     return elapsed, peak
                 finally:
+                    batch = loss = None
                     model.zero_grad(set_to_none=True)
                     torch.cuda.empty_cache()
 
             try:
-                batch_size, measurements = search_batch(probe, min(config.batch_size, len(sampler) if sampler else len(train_data)), memory_budget)
+                batch_size, measurements = search_batch(probe, limit, memory_budget)
             except torch.cuda.OutOfMemoryError:
                 batch_size, measurements = 0, []
-            if distributed:
-                shared = torch.tensor(batch_size, device=device)
-                torch.distributed.all_reduce(shared, op=torch.distributed.ReduceOp.MIN)
-                batch_size = int(shared)
-            if batch_size < 1:
-                batch_size = 1
-                raise torch.cuda.OutOfMemoryError('No safe training batch fits on every assigned GPU')
-            resources['batch_tuning'] = {'measurements': measurements, 'memory_budget_bytes': memory_budget}
+            tuning['measurements'] = measurements
+        tuning.update(rank=rank, device=str(device), selected_batch_size=batch_size)
+        if distributed:
+            shared = torch.tensor(batch_size, device=device)
+            torch.distributed.all_reduce(shared, op=torch.distributed.ReduceOp.MIN)
+            batch_size = int(shared)
+        if batch_size < 1:
+            batch_size = 1
+            raise torch.cuda.OutOfMemoryError('No safe training batch fits on every assigned GPU')
+        if distributed:
+            per_rank = [None] * world_size
+            torch.distributed.all_gather_object(per_rank, tuning)
+        else:
+            per_rank = [tuning]
+        resources['batch_tuning'] = {**tuning, 'per_rank': per_rank,
+                                     'synchronized_batch_size': batch_size, 'automatic': automatic}
         loader = DataLoader(train_data, batch_size=batch_size, sampler=sampler, shuffle=sampler is None,
                             collate_fn=collate, **loader_options)
         validation = DataLoader(validation_shard, batch_size=batch_size, collate_fn=collate, **loader_options)

@@ -1,9 +1,8 @@
 """Minimal adaptation of PINNs/gpu_optimizer.py and sandbox_optimizer_lib.py.
 
-Reuse: GPU discovery, VRAM budget heuristic and DistributedHandler's model wrapper.
+Reuse: GPU discovery and DistributedHandler's model wrapper; tuning.py probes real batches.
 Diffusion training uses torchrun/DDP; small reusable policies can use DataParallel.
 """
-import math
 import json
 import os
 from pathlib import Path
@@ -52,18 +51,18 @@ def launch_training(config, output):
         for marker in directory.glob('oom-rank-*.json'):
             marker.unlink()
         write_json(request, config.model_dump())
-        get_logger().info('Launching training: %d GPU(s), %d process(es), batch limit %d, auto optimize=%s',
-                          config.gpus, max(1, config.gpus), config.batch_size, config.auto_optimize)
+        get_logger().info('Launching training: %d GPU(s), %d process(es), batch=%s, auto optimize=%s',
+                          config.gpus, max(1, config.gpus), config.batch_size or 'automatic', config.auto_optimize)
         try:
             subprocess.run(command, check=True, env={**os.environ, 'PYTHONUNBUFFERED': '1'})
             break
         except subprocess.CalledProcessError:
             failures = [json.loads(path.read_text()) for path in directory.glob('oom-rank-*.json')]
             sizes = [row['batch_size'] for row in failures]
-            if (not config.auto_optimize or not sizes or min(sizes) <= 1
+            if ((not config.auto_optimize and config.batch_size > 0) or not sizes or min(sizes) <= 1
                     or any(row.get('phase') == 'setup' for row in failures)):
                 raise
-            reduced = max(1, min(config.batch_size, min(sizes)) // 2)
+            reduced = max(1, min(config.batch_size or min(sizes), min(sizes)) // 2)
             retries.append({'previous_limit': config.batch_size, 'new_limit': reduced})
             write_json(directory / 'batch_backoff.json', retries)
             config = config.model_copy(update={'batch_size': reduced})
@@ -92,10 +91,7 @@ def auto_configure_training(device='auto', workers=1):
         devices = [device]
     else:
         raise ValueError(f'Unavailable device {device}; available CUDA devices: {available}')
-    minimum_memory = min((gpu['memory_gb'] for gpu in info['gpus']), default=0.)
-    available_mb = max(0., minimum_memory * 1024 * .7 - 100 - 500)
-    estimate = 2**int(math.log2(max(1., available_mb / 2))) if minimum_memory else 32
-    return {'devices': devices, 'estimated_batch_capacity': min(65536, estimate), 'hardware': info}
+    return {'devices': devices, 'hardware': info}
 
 
 class DistributedHandler:
