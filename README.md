@@ -107,6 +107,63 @@ independent tasks inside that job can use multiple GPUs concurrently. Starting a
 second job returns HTTP 409. `LIDARPOC_RUNS=/data/lidar-runs` changes artifact
 storage when set before starting the server.
 
+## Simple presentation UI
+
+`app_simple.py` is an additional results viewer for a nontechnical audience. The
+technical workflow remains in `app.py`. Run the simple client **instead of** the
+technical client on port 9000; keep the API and existing SSH tunnel running:
+
+```bash
+cd /home/r/Work/Clone_Ver/Med_Img_Gen/Syn
+streamlit run app_simple.py --server.address 127.0.0.1 --server.port 9000
+```
+
+Open `http://127.0.0.1:9000`. Choose a finished paired-generation result. Every saved
+camera frame is shown with its recorded photo, real scan overlay, untrained
+synthetic overlay and trained synthetic overlay. Images remain in their original
+resolution and can be enlarged in Streamlit. There is no frame dropdown hiding
+other images. Additional saved synthetic images are also displayed with neutral
+labels.
+
+The page contains exactly two summary charts:
+
+- **Scan overlap with the real recording:** shared LiDAR range-grid occupancy
+  divided by union occupancy, pooled across frames valid for both arms, expressed
+  as a percentage. Higher means closer coverage; 100% means the same occupied
+  scan pixels. This measures return coverage, not photographic realism.
+- **Distance-distribution difference (Wasserstein-1):** the exact scalar radial-range
+  W1 values already calculated by the reporting library, in metres. Values are
+  averaged equally across frames valid for both arms. Lower means the distance
+  distribution is closer to the real scan. This uses all valid scalar values and
+  does not use the sampled multivariate point-cloud estimate.
+
+Both charts show the real reference as context (100% overlap and zero W1). Their
+captions identify how many frames contributed. The explanation follows the measured
+result even when the trained arm is worse. Missing scores produce a clear message
+and no fabricated graph. Camera backgrounds are identified as recorded photos;
+the coloured laser points are synthetic. Both arms are conditioned on the same
+scene, so these two measures alone do not establish overall generation quality.
+
+The simple UI reads existing results and uses the current SSH tunnel. It does not
+start jobs or recompute sensor statistics. To backfill missing scores, use **Build /
+refresh pixel and OT graphs** in the technical app. For a comparison, that app must
+have generated a run with **Compare without training / with training** enabled;
+two ordinary samples are never relabelled as the two training arms.
+
+You can also open an extracted artifact folder directly on the client, without a
+server connection or model dependencies:
+
+```bash
+LIDARPOC_RESULTS=/home/r/lidarpoc streamlit run app_simple.py --server.address 127.0.0.1 --server.port 9000
+```
+
+The folder needs `result.json` and `overlays/`. Choose **Downloaded folder** in the
+sidebar to switch manually. **Prepare a shareable summary** embeds all available
+images and the two charts in one downloadable HTML file for offline sharing. The
+client uses only `requirements-client.txt`; it does not require Torch or POT.
+`lidarpoc/presentation.py` keeps score aggregation, labels and HTML/SVG rendering
+separate from the Streamlit entry point. API/remote compute code is unchanged.
+
 ## Logs, GPU graphs and existing SSH connections
 
 Worker stdout/stderr is printed immediately in the server terminal and saved to
