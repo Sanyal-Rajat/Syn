@@ -78,6 +78,13 @@ def train(config, output):
         torch.manual_seed(config.seed)
         manifest = load_manifest(config.manifest, verify_files=rank == 0)
         license_gate(manifest)
+        if rank == 0:
+            from .ot.reference import prepare_reference
+            config = prepare_reference(config, output, manifest)
+            write_json(output / 'request.json', config.model_dump())
+        if distributed:
+            torch.distributed.barrier()
+            config = RunConfig.model_validate_json((output / 'request.json').read_text())
         train_data = RangeDataset(manifest, 'train', config.window)
         validation_data = RangeDataset(manifest, 'validation', config.window)
         sampler = DistributedSampler(train_data, shuffle=True, seed=config.seed) if distributed else None

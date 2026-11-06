@@ -118,38 +118,35 @@ cd /home/r/Work/Clone_Ver/Med_Img_Gen/Syn
 streamlit run app_simple.py --server.address 127.0.0.1 --server.port 9000
 ```
 
-Open `http://127.0.0.1:9000`. Choose a finished paired-generation result. Every saved
-camera frame is shown with its recorded photo, real scan overlay, untrained
-synthetic overlay and trained synthetic overlay. Images remain in their original
-resolution and can be enlarged in Streamlit. There is no frame dropdown hiding
-other images. Additional saved synthetic images are also displayed with neutral
-labels.
+Open `http://127.0.0.1:9000`. Choose a finished comparison result. Every saved
+camera view is shown as **Camera photo**, **Actual**, **Without training** and
+**With training**. Additional generated images are also displayed. The viewer replaces
+old image banners with these same plain labels in the displayed and shared copies.
+Images keep their original dimensions. There is no view dropdown hiding other images.
 
-The page displays two native interactive summary charts above the images, with
-numeric labels and hover details:
+The page displays two native interactive summary charts above the images. Each
+comparison chart has three rows in this order: **Actual**, **Without training**,
+**With training**. Names sit to the left, bars in the centre and measured values
+in a separate column to the right, with hover details available:
 
-- **Scan overlap with the real recording:** shared LiDAR range-grid occupancy
-  divided by union occupancy, pooled across frames valid for both arms, expressed
-  as a percentage. Higher means closer coverage; 100% means the same occupied
-  scan pixels. This measures return coverage, not photographic realism.
-- **Distance-distribution difference (Wasserstein-1):** the exact scalar radial-range
-  W1 values already calculated by the reporting library, in metres. Values are
-  averaged equally across frames valid for both arms. Lower means the distance
-  distribution is closer to the real scan. This uses all valid scalar values and
-  does not use the sampled multivariate point-cloud estimate.
+- **Coverage match:** a higher percentage means the coverage is closer to the
+  real scene. A value of 100% means the same coverage.
+- **Distance difference:** compares the pattern of measured distances, in metres.
+  Smaller values mean a closer match; zero means the same distance pattern.
 
-Both charts show the real reference as context (100% overlap and zero W1). Their
-captions identify how many frames contributed. The explanation follows the measured
-result even when the trained arm is worse. Ordinary Generate results also show
-their available graphs, labelled **Synthetic scan 1**, **Synthetic scan 2**, etc.;
-an ordinary run is never presented as an untrained/trained comparison. Missing
-scores produce a clear message and no fabricated graph. Camera backgrounds are identified as recorded photos;
-the coloured laser points are synthetic. Both arms are conditioned on the same
-scene, so these two measures alone do not establish overall generation quality.
+Both charts show the real scene as context (100% coverage match and zero distance
+difference). A zero value has a small marker at the start of its bar; it is never
+given a fabricated positive length. Captions identify how many views contributed. The displayed values
+and calculations are unchanged. Individual generation results also show their
+available graphs, labelled **Version 1**, **Version 2**, etc. Missing scores produce
+a short availability message. Photos are identified as recorded images. The simple
+viewer and its downloadable summary use generic labels throughout, including chart
+axes, hover details, image banners and filenames. Diagnostic details are logged in
+the client terminal rather than shown to the audience.
 
 The simple UI reads existing results and uses the current SSH tunnel. It does not
-start jobs or recompute sensor statistics. To backfill missing scores, use **Build /
-refresh pixel and OT graphs** in the technical app. For a comparison, that app must
+start jobs or recompute sensor statistics. To backfill missing scores, refresh the
+result's analysis in `app.py`. For a comparison, that app must
 have generated a run with **Compare without training / with training** enabled;
 two ordinary samples are never relabelled as the two training arms.
 
@@ -162,9 +159,9 @@ LIDARPOC_RESULTS=/home/r/lidarpoc streamlit run app_simple.py --server.address 1
 
 The folder needs `result.json` and `overlays/`. If the result JSON has no embedded
 pixel analysis, the viewer also reads a saved `pixel_graphs.json` in that folder.
-Older paired reports can supply scan overlap from `comparison.frames`; Wasserstein
-still requires saved transport measurements. Choose **Downloaded folder** in the
-sidebar to switch manually. **Prepare a shareable summary** embeds all available
+Older comparison reports can supply coverage scores from `comparison.frames`;
+distance charts require saved distance measurements. Choose **Saved results** in the
+sidebar to switch manually. **Create shareable summary** embeds all available
 images and charts in one downloadable HTML file for offline sharing. The
 client uses only `requirements-client.txt`; it does not require Torch or POT.
 `lidarpoc/presentation.py` keeps score aggregation, labels and HTML/SVG rendering
@@ -258,11 +255,66 @@ before the helper can share it. OpenSSH describes this behavior under
    after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
    fingerprint is a heuristic, not a comprehensive scene-identity proof.
-6. Choose **Train diffusion + calibration** for the original diffusion/PPO workflow,
+6. Choose **Train diffusion + calibration** for training with automatic distribution matching and RL calibration,
    **Generate** for an existing application checkpoint, or **OT + diffusion + RL
    experiment** for the ablation and controller matrix. Data, checkpoint, scene
    and output paths refer to the server filesystem. SSH key and control-socket
    paths refer to the client filesystem.
+
+## Default LiDAR distribution matching
+
+Ordinary Train and Generate jobs minimize LiDAR transport objectives by default.
+No separate experiment, reference-file entry or learned controller is required.
+The reference is built automatically from at most 32 evenly spaced windows of the
+frozen **training split** and saved as `ot_reference.npz` beside the job artifacts.
+Validation/test scans and camera RGB pixels do not enter the reference. Missing
+observed intensity disables that feature automatically; distance and return
+alignment remain enabled. A provided reference is validated against the manifest,
+feature definition and temporal window before use.
+
+- **Training:** conditional and unbalanced OT losses both have default weight
+  `1.0`, in addition to the existing diffusion, geometry, return-mask and temporal
+  losses. DDP workers share the reference prepared by rank zero. Actual settings
+  are saved in the request/checkpoint; training logs include the OT loss components.
+- **Generation:** each sampling GPU runs 12 bounded output-refinement steps by
+  default, optimizing distances, return probabilities and available intensity.
+  The objective combines conditional transport, unbalanced return-mass transport
+  and an unsupported-bin penalty. Candidate updates obey sensor bounds and, for
+  conditioned scenes, the existing surface tolerance and known-ray mask. Selection
+  evaluates the actual exported hard masks and includes the original output, so
+  the retained objective cannot worsen. When an optional calibration profile or
+  learned controller modifies the output, final arrays are refined again across
+  the selected GPUs before export.
+
+`result.json` records `ot_training` for Train and per-sample initial/final objectives,
+attempted steps, accepted updates and reference provenance under `ot_alignment`
+for Generate. The PDF includes the measured changes. NPZ files also retain the
+generation alignment diagnostics. Other displayed scores, such as the scalar
+distance-distribution chart, measure different properties and may still worsen.
+
+Settings are modular under `lidarpoc/ot/`; the existing RL library remains separate.
+The default settings below apply to both UI submissions and JSON requests:
+
+```json
+"ot": {
+  "conditional_weight": 1.0,
+  "mass_weight": 1.0,
+  "reference_windows": 32,
+  "generation_enabled": true,
+  "generation_steps": 12,
+  "generation_lr": 0.05
+}
+```
+
+Explicit experiment ablations retain their documented training controls: E0 does
+no additional training and E1 omits OT training losses. Generation alignment uses
+the same setting across arms. An explicit raw-generation override is still
+available with `ot.generation_enabled=false`; zero training weights remain
+available for controlled comparisons. Older checkpoints can use the new generation
+refinement, but must be retrained to incorporate OT into their learned weights.
+Generation defaults use the checkpoint's physical feature definition, with current
+request overrides applied explicitly. A missing legacy reference is rebuilt from
+the matching manifest's training split.
 
 ## Automatic GPU scheduling
 
@@ -552,8 +604,9 @@ Each file contains the checkpoint's temporal frame count; it is not one file per
 frame. Both arms use the same real conditioning, sampling seed, DDIM steps and
 geometry constraints. The untrained initialization is reproducible from its own
 seed, but is not claimed to reproduce the trained model's historical initial
-weights. Calibration profiles and learned OT controllers are bypassed in this mode
-to isolate the diffusion weights. Their saved UI fields remain available when you
+weights. Calibration profiles and learned OT controllers are bypassed in this mode.
+Both arms use identical default output-refinement settings and the same training-only
+reference, so the comparison includes the shared generation pipeline. Their saved UI fields remain available when you
 turn comparison off; existing training, RL and ordinary generation still work.
 With at least two selected GPUs, the two arms run concurrently on separate GPUs;
 with one GPU or CPU, they run sequentially. Two samples do not provide independent

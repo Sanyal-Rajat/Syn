@@ -30,7 +30,7 @@ def read_examples(manifest, split, window, per_trace):
     return examples
 
 
-def generate(model, count, seed=0, conditioning=None, has_intensity=True, sampler=None):
+def generate(model, count, seed=0, conditioning=None, has_intensity=None, sampler=None):
     from .sampling import SamplingPool
 
     result = []
@@ -39,7 +39,8 @@ def generate(model, count, seed=0, conditioning=None, has_intensity=True, sample
     requests = [{'batch_size': 1, 'conditioning': conditioning, 'seed': seed + index} for index in range(count)]
     for generated in sampler.sample_many(requests):
         sample = {key: value[0].cpu().numpy() for key, value in generated.items()}
-        sample['has_intensity'] = np.asarray([has_intensity] * model.config['window'])
+        if has_intensity is not None or 'has_intensity' not in sample:
+            sample['has_intensity'] = np.asarray([True if has_intensity is None else has_intensity] * model.config['window'])
         sample['max_range_m'] = float(model.sensor_meta['max_range_m'])
         result.append(sample)
     return result
@@ -120,14 +121,29 @@ def _run(config, directory):
     validate_checkpoint(checkpoint, config.manifest)
     if config.compare_training and int(checkpoint.get('epoch', 0)) < 1:
         raise ValueError('Training comparison requires a checkpoint with at least one completed training epoch')
+    window = checkpoint['config']['window']
+    model_config = dict(checkpoint['config'])
+    if config.action == 'generate':
+        from .ot.config import OTConfig
+        from .ot.reference import prepare_reference, specification
+        # Keep the checkpoint's physical feature definition; current generation defaults apply to old checkpoints too.
+        overrides = {name: getattr(config.ot, name) for name in config.ot.model_fields_set}
+        overrides.update({name: getattr(config.ot, name) for name in
+                          ('generation_enabled', 'generation_steps', 'generation_lr', 'reference_windows')})
+        saved_ot = OTConfig(**checkpoint['config'].get('ot', {}))
+        ot = saved_ot.model_copy(update=overrides)
+        if 'reference' not in config.ot.model_fields_set and specification(ot) != specification(saved_ot):
+            ot = ot.model_copy(update={'reference': ''})
+        config = prepare_reference(config.model_copy(update={'ot': ot, 'window': window}), directory, manifest)
+        model_config.update(manifest=config.manifest, ot=config.ot.model_dump())
+        write_json(directory / 'request.json', config.model_dump())
     device = 'cuda:0' if config.gpus and torch.cuda.is_available() else 'cpu'
     torch.set_num_threads(1 if device == 'cpu' else 4)
-    model = LidarDMAdapter(checkpoint['config'], checkpoint['sensor_meta']).to(device)
+    model = LidarDMAdapter(model_config, checkpoint['sensor_meta']).to(device)
     model.load_state_dict(checkpoint['state_dict'])
     model.config.update(auto_optimize=config.auto_optimize, batch_size=config.batch_size)
     from .sampling import SamplingPool
     sampler = SamplingPool(model, [f'cuda:{index}' for index in range(config.gpus)])
-    window = checkpoint['config']['window']
     real_scene, conditioning_source = None, None
     if config.action == 'generate' and (config.conditioning or config.auto_conditioning):
         from .data.conditioning import export_real_scene
@@ -168,6 +184,13 @@ def _run(config, directory):
             differences = [abs(sample['range'][sample['valid']] - reference[sample['valid']]) for sample in generated]
             geometry = {'new_surface_returns': 0,
                         'max_surface_deviation_m': max((float(value.max()) for value in differences if len(value)), default=0.)}
+        if config.ot.generation_enabled and (config.profile_file or config.controller_file):
+            from .ot.refinement import refine_samples
+            progress('aligning final LiDAR output after calibration/controller processing')
+            generated = refine_samples(generated, model, config.ot, conditioning, sampler.devices)
+            if conditioning is not None:
+                differences = [abs(sample['range'][sample['valid']] - reference[sample['valid']]) for sample in generated]
+                geometry['max_surface_deviation_m'] = max((float(value.max()) for value in differences if len(value)), default=0.)
         sample_metadata = {'elevations': np.asarray(manifest['sensor_meta']['elevations'])}
         if real_scene:
             with np.load(real_scene, allow_pickle=False) as scene:
@@ -187,6 +210,8 @@ def _run(config, directory):
         report['geometry'] = geometry
         report['calibration_profile'] = config.profile_name if config.profile_file else 'uncalibrated'
         report['generation_controller'] = config.controller_file or None
+        from .ot.refinement import describe_refinement
+        report['ot_alignment'] = describe_refinement(generated, config.ot, bool(config.profile_file or config.controller_file))
         from .camera_overlay import export_overlays
         report['camera_overlays'] = export_overlays(config, manifest, directory, real_scene, progress)
         if config.compare_training:
@@ -195,6 +220,7 @@ def _run(config, directory):
                 'arms': ARMS, 'sampling_seed': config.seed, 'initialization_seed': config.comparison_init_seed,
                 'checkpoint_epoch': int(checkpoint['epoch']), 'trained_checkpoint': str(checkpoint_path),
                 'baseline': 'Fresh random initialization of the same architecture; no checkpoint weights loaded. Not the historical pre-training weights.',
+                'shared_output_alignment': report['ot_alignment']['enabled'],
             }
         from .pixel_graphs import analyze_pixels
         progress('exporting pixel graphs, full-resolution maps and CSV metrics')
@@ -253,6 +279,7 @@ def _run(config, directory):
                         elevations=np.asarray(manifest['sensor_meta']['elevations']))
     points = unproject(preview['range'][0], preview['valid'][0], manifest['sensor_meta']['elevations'])
     report = {'action': 'train', 'checkpoint': str(checkpoint_path), 'evaluations': evaluations,
+              'ot_training': checkpoint['config'].get('ot', {}),
               'profiles': profiles, 'selected_profile_on_validation': selected_profile,
               'training': json.loads((directory / 'training.json').read_text()),
               'resources': hardware(), 'preview': {'range': preview['range'][0].tolist(),

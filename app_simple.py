@@ -1,5 +1,6 @@
 """Results-only Streamlit presentation for a nontechnical audience."""
 import json
+import logging
 import os
 from pathlib import Path
 from urllib.parse import quote
@@ -7,13 +8,17 @@ from urllib.parse import quote
 import httpx
 import streamlit as st
 
-from lidarpoc.presentation import chart_spec, gallery, image_name, overlap_text, share_html, summary
+from lidarpoc.presentation import (CHARTS, chart_caption, chart_spec, gallery, image_name,
+                                  overlap_text, presentation_image, share_html, summary)
 
-st.set_page_config(page_title='See what training changes', layout='wide')
+LOGGER = logging.getLogger(__name__)
+
+st.set_page_config(page_title='Scene comparison', layout='wide')
 st.markdown('<style>.block-container{max-width:1500px;padding-top:2rem}</style>', unsafe_allow_html=True)
-st.title('See what training changes')
-st.write('Compare synthetic scans with the same real recording.')
-st.caption('Photos are recorded. The coloured laser points are synthetic.')
+st.title('Scene comparison')
+st.write('See how the generated versions compare with a real scene.')
+st.caption('The generated versions show coloured scene points on recorded photos.')
+present_image = st.cache_data(ttl=300, max_entries=64, show_spinner=False)(presentation_image)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -33,24 +38,24 @@ def remote_image(endpoint, job_id, filename):
 
 with st.sidebar:
     st.subheader('Choose results')
-    source = st.radio('Open results from', ['Connected server', 'Downloaded folder'],
+    source = st.radio('Open results from', ['Online results', 'Saved results'],
                       index=1 if os.environ.get('LIDARPOC_RESULTS') else 0)
     if st.button('Refresh results'):
         remote_json.clear()
         remote_image.clear()
+        present_image.clear()
         st.session_state.pop('simple_share', None)
         st.rerun()
-    with st.expander('Setup'):
-        endpoint = st.text_input('Server connection', 'http://127.0.0.2:9000').rstrip('/')
-        folder = st.text_input('Downloaded results folder', os.environ.get('LIDARPOC_RESULTS', str(Path.home() / 'lidarpoc')),
-                               help='Folder containing result.json and the overlays folder.')
-        st.caption('Uses your existing SSH tunnel. The technical app remains available as app.py.')
+    with st.expander('Connection settings'):
+        endpoint = st.text_input('Results address', 'http://127.0.0.2:9000').rstrip('/')
+        folder = st.text_input('Results folder', os.environ.get('LIDARPOC_RESULTS', str(Path.home() / 'lidarpoc')),
+                               help='Choose the folder containing your downloaded results.')
 
 try:
-    if source == 'Connected server':
+    if source == 'Online results':
         jobs = [row for row in remote_json(endpoint, '/jobs') if row.get('action') == 'generate' and row.get('status') == 'completed']
         if not jobs:
-            st.info('No finished scene results are available yet.')
+            st.info('No results are ready yet.')
             st.stop()
         identifiers = [row['id'] for row in jobs]
         requested = st.query_params.get('job')
@@ -74,60 +79,52 @@ try:
                 raise ValueError('Image must be inside the downloaded overlays folder')
             return path.read_bytes()
 except (httpx.HTTPError, OSError, ValueError, KeyError) as error:
-    st.info('These results could not be opened. Check the selected folder or reconnect the existing server tunnel.')
-    with st.expander('Connection details'):
-        st.text(str(error))
+    LOGGER.warning('Unable to open scene results: %s', error)
+    st.info('These results could not be opened. Check your connection or choose another saved folder.')
     st.stop()
 
 if not isinstance(report, dict) or report.get('action') != 'generate':
-    st.info('Choose a completed scene-generation result.')
+    st.info('Choose a finished scene result.')
     st.stop()
 
-if source == 'Downloaded folder' and not report.get('pixel_analysis', {}).get('frames'):
+if source == 'Saved results' and not report.get('pixel_analysis', {}).get('frames'):
     analysis_path = directory / 'pixel_graphs.json'
     if analysis_path.is_file():
         try:
             report = {**report, 'pixel_analysis': json.loads(analysis_path.read_text())}
             identity += (analysis_path.stat().st_mtime_ns,)
         except (OSError, ValueError) as error:
-            st.warning('Saved graph measurements could not be opened: ' + str(error))
+            LOGGER.warning('Unable to read saved scene measurements: %s', error)
+            st.info('The saved graph results could not be opened. Available images are shown below.')
 
+identity = ('comparison-bars',) + identity
 data = summary(report)
-st.subheader('Comparison graphs')
+st.subheader('How close are the versions to the real scene?')
 st.write(overlap_text(data))
 if not data['paired']:
-    st.info('This result has no verified untrained/trained pair. Available graphs compare each synthetic scan with the real recording.')
-    with st.expander('Choose a result with both versions'):
-        st.write('In app.py, generate a run with Compare without training / with training enabled, then select that completed result here.')
-if data['overlap']:
-    st.vega_lite_chart(chart_spec(data['overlap'], 'Scan overlap with the real recording', '%', True),
-                       use_container_width=True)
-    st.caption(f"Based on {data['overlap_frames']} of {data['frame_count']} frames. Higher means more shared laser-return pixels; it is not a photo-quality score.")
-else:
-    st.info('Scan-overlap measurements are missing. Refresh this run’s analysis in the technical app.')
-if data['wasserstein']:
-    st.vega_lite_chart(chart_spec(data['wasserstein'], 'Distance-distribution difference (Wasserstein-1)', 'm'),
-                       use_container_width=True)
-    st.caption(f"Based on {data['wasserstein_frames']} of {data['frame_count']} frames. A smaller bar means the spread of measured distances is closer to the real recording. Each frame is counted equally.")
-else:
-    st.info('The Wasserstein measurement is missing. Use Build / refresh pixel and OT graphs in the technical app.')
-with st.expander('What do the two charts mean?'):
-    st.write('Scan overlap compares which laser-return pixels are present. A value of 100% means the same occupied scan pixels. '
-             'Wasserstein-1 compares the distributions of measured distances in metres, using all valid values. '
-             'The first chart pools scan pixels across shared valid frames; the second averages per-frame distances. '
-             'The real reference is 100% overlap and zero distance from itself. '
-             'The synthetic scans use the same conditioning scene, so these charts describe two aspects of the scan rather than overall photographic realism.')
+    st.info('These results show individual versions. Select a comparison result to see Without training and With training together.')
+for key, info in CHARTS.items():
+    if data[key]:
+        st.vega_lite_chart(chart_spec(data[key], info['title'], info['unit'], info['higher_better']),
+                           use_container_width=True)
+        st.caption(chart_caption(data, key))
+    else:
+        st.info(info['title'] + ' is unavailable for this result.')
+with st.expander('How to read the graphs'):
+    st.write('Coverage match: higher means closer coverage of the real scene. '
+             '100% means the same coverage.')
+    st.write('Distance difference: lower means a closer pattern of distances. '
+             'Zero means the same distance pattern.')
 
 frames = gallery(report)
 if not frames:
-    st.info('This result has no matched camera images available.')
+    st.info('No camera photos are available for these results.')
     reason = report.get('camera_overlays', {}).get('reason')
     if reason:
-        with st.expander('Image availability'):
-            st.text(reason)
+        LOGGER.warning('Camera images unavailable: %s', reason)
 
 for index, frame in enumerate(frames, 1):
-    st.subheader(f'Scene view {index}')
+    st.subheader(f'View {index}')
     for start in range(0, len(frame['cards']), 4):
         cards = frame['cards'][start:start + 4]
         for panel, card in zip(st.columns(len(cards)), cards):
@@ -135,18 +132,17 @@ for index, frame in enumerate(frames, 1):
             try:
                 if not card.get('file'):
                     raise ValueError('No matching image was recorded')
-                card['data'] = load_image(card['file'])
+                original = load_image(card['file'])
+                card['data'] = present_image(original, card['label']) if card['overlay'] else original
                 panel.image(card['data'])
             except (httpx.HTTPError, OSError, ValueError) as error:
+                LOGGER.warning('Unable to display scene image: %s', error)
                 panel.info('Image unavailable')
                 card['data'] = None
-                with panel.expander('Details'):
-                    st.text(str(error))
 
 if frames or data['overlap'] or data['wasserstein']:
-    if st.button('Prepare a shareable summary'):
+    if st.button('Create shareable summary'):
         st.session_state['simple_share'] = (identity, share_html(report, data, frames))
     prepared = st.session_state.get('simple_share')
     if prepared and prepared[0] == identity:
-        st.download_button('Download image comparison', prepared[1],
-                           'training_comparison.html' if data['paired'] else 'scene_images.html', 'text/html')
+        st.download_button('Download summary', prepared[1], 'scene_comparison.html', 'text/html')

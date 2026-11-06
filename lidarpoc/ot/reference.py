@@ -1,16 +1,64 @@
 """Persist bounded training-only features with immutable split/config provenance."""
 import json
 from pathlib import Path
+import shutil
 
 import numpy as np
 import torch
 
-from ..data.split_manifest import digest, load_manifest
+from ..data.split_manifest import digest, load_manifest, load_window, windows
+from ..logs import get_logger
 from .features import features, return_mass, select
 
 
 def specification(config):
-    return config.model_dump(exclude={'reference', 'conditional_weight', 'mass_weight', 'physics_weight', 'regularization_weight'})
+    return config.model_dump(exclude={'reference', 'conditional_weight', 'mass_weight', 'physics_weight',
+        'regularization_weight', 'reference_windows', 'generation_enabled', 'generation_steps', 'generation_lr'})
+
+
+def prepare_reference(config, directory, manifest=None, required=False):
+    """Build/reuse a bounded training-only reference before any training or generation."""
+    ot = config.ot
+    training = config.action == 'train' and any((ot.conditional_weight, ot.mass_weight,
+                                               ot.physics_weight, ot.regularization_weight))
+    if not (required or ot.generation_enabled or training):
+        return config
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / 'ot_reference.npz'
+    source = Path(ot.reference).expanduser() if ot.reference else target
+    if source.is_file():
+        try:
+            _, metadata = load_reference(source, config.manifest, ot)
+            if metadata.get('window', config.window) != config.window:
+                raise ValueError('OT reference temporal window differs from the model')
+        except ValueError:
+            if ot.reference:
+                raise
+        else:
+            if source.resolve() != target:
+                shutil.copy2(source, target)
+            get_logger().info('Using training-only OT reference: %s', target)
+            return config.model_copy(update={'ot': ot.model_copy(update={'reference': str(target)})})
+    elif ot.reference:
+        get_logger().warning('Saved OT reference is unavailable; rebuilding from the frozen training split')
+    manifest = manifest or load_manifest(config.manifest)
+    records = windows(manifest, 'train', config.window)
+    if not records:
+        raise ValueError('No complete training windows are available for the OT reference')
+    indices = np.linspace(0, len(records) - 1, min(len(records), ot.reference_windows), dtype=int)
+    samples = [load_window(records[index][1], manifest['sensor_meta'], records[index][0]) for index in indices]
+    observed = all(bool(np.asarray(sample.get('has_intensity', False)).all()) for sample in samples)
+    if not observed and ot.feature_weights[1]:
+        weights = list(ot.feature_weights)
+        weights[1] = 0.
+        if not any(weights):
+            raise ValueError('The only weighted OT feature is unobserved intensity; enable an observed feature such as range')
+        ot = ot.model_copy(update={'feature_weights': weights})
+        get_logger().info('OT intensity alignment disabled: the reference has no complete observed intensity channel')
+    reference = build_reference(samples, config.manifest, ot, target)
+    get_logger().info('Built OT reference from %d training windows: %s', len(samples), reference)
+    return config.model_copy(update={'ot': ot.model_copy(update={'reference': reference})})
 
 
 def tensor_sample(sample, device='cpu'):
@@ -42,6 +90,8 @@ def build_reference(samples, manifest_path, config, path):
     centers, mass = return_mass(sample, manifest['sensor_meta'], config)
     metadata = {'split': 'train', 'sequence_ids': sorted(identities), 'manifest_sha256': digest(manifest_path),
                 'specification': specification(config), 'mass_units': 'returns / fixed ray exposure',
+                'window': int(samples[0]['range'].shape[0]), 'window_count': len(samples),
+                'intensity_observed': all(bool(np.asarray(sample.get('has_intensity', False)).all()) for sample in samples),
                 'features': ['range_m', 'normalized_intensity', 'elevation_rad', 'local_return_rate', 'sensor_frame_persistence']}
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, features=torch.cat(list(selected.values())).numpy(),

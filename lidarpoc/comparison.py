@@ -119,7 +119,9 @@ def analyze(directory, report, voxel_size):
             'overlay_rgb': 'RGB discrepancy on union foreground dilated by one pixel, excluding label rows 0..24. Shared recorded background is not independently generated RGB.'},
         'limitations': ['Two paired synthetic windows provide descriptive discrepancies, not a statistical covariate-shift test or population estimate.',
             'Both arms use the same real conditioning, sampling seed, ray mask and range-clamping rules; geometry agreement is constrained by construction.',
-            'No calibration postprocessor or learned OT controller is used in this weights-only comparison.',
+            ('Both arms use the same OT output refinement; no calibration profile or learned controller is used.'
+             if report.get('ot_alignment', {}).get('enabled') else
+             'No calibration postprocessor or learned OT controller is used in this weights-only comparison.'),
             'RGB overlays share the same recorded photo; image histograms do not establish synthetic RGB fidelity.',
             'Missing support yields null metrics rather than a fabricated zero. Camera mounting, timestamp and occlusion limitations still apply.']}
     write_json(directory / 'comparison.json', result)

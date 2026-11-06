@@ -6,11 +6,21 @@ The existing application is extended through `action: "experiment"`; Prepare,
 Train, Generate, PPO calibration, logs, telemetry and SSH reuse keep their original
 entry points. No additional runtime package is required.
 
+Ordinary Train now enables conditional and unbalanced transport losses by default
+(weight 1 each). A bounded training-only reference is prepared automatically.
+Generate applies bounded output refinement by default, on the existing sampling
+GPUs, and records initial/final hard-export objectives. Calibration/controller
+outputs receive a final refinement pass before export. Existing checkpoints support
+generation refinement; new training is required to change their learned objective.
+The explicit E0/E1 experiment training controls remain available. Output refinement
+uses the same setting across all experiment/comparison arms. See the README's
+default distribution-matching section for settings, provenance and output limits.
+
 ## Report mapping
 
 | Requirement | Implementation |
 | --- | --- |
-| E0, unadapted baseline | Random-root model, or the same approved own checkpoint used by every arm; no new fitting |
+| E0, unadapted baseline | Random-root model, or the same approved own checkpoint used by every arm; no new model training; shared generation refinement still applies |
 | E1, real-domain diffusion | Same UNet capacity, seed, epochs and approved training traces |
 | E2, conditional transport | E1 plus debiased Sinkhorn on fixed physical features |
 | E3, return masses | E2 plus KL-regularized unbalanced transport |
@@ -41,8 +51,9 @@ local return density and sensor-frame temporal persistence. Default scales are
 `[120, 1, pi/2, 1, 1]`; costs are weighted squared scaled distances. Scales and
 weights are explicit physical configuration, never fitted on development/test
 data. The frozen reference records the feature specification, training trace IDs
-and prepared-manifest hash. With missing observed intensity, set its weight to zero;
-the default intensity-enabled reference refuses missing measurements.
+and prepared-manifest hash. Automatic reference preparation disables the intensity
+weight when observed measurements are missing. The lower-level reference builder
+still rejects a positive intensity weight with missing measurements.
 
 Conditional bins use fixed range edges and ring groups. They approximate scene
 conditions; they do not establish matched materials, weather or incidence angles.

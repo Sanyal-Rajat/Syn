@@ -152,7 +152,8 @@ def start(config: RunConfig):
         job_id = uuid4().hex
         path = ROOT / job_id
         path.mkdir(parents=True)
-        (path / 'request.json').write_text(config.model_dump_json(indent=2))
+        # Preserve which nested options the client supplied when handing off to the worker.
+        (path / 'request.json').write_text(config.model_dump_json(indent=2, exclude_unset=True))
         state = {'id': job_id, 'status': 'running', 'action': config.action}
         save(path / 'state.json', state)
         try:

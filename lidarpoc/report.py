@@ -58,6 +58,9 @@ def findings(report):
     selected = report.get('selected_arm', report.get('selected_profile_on_validation'))
     rows = {row['name']: row for row in comparison_rows(report)}
     text = []
+    ot_training = report.get('ot_training', {})
+    if ot_training.get('conditional_weight') or ot_training.get('mass_weight'):
+        text.append('Training minimizes conditional and/or unbalanced LiDAR transport losses against a frozen training-only reference.')
     if selected:
         text.append(f'Selected on development/validation data: {selected}. Test scores did not choose the selection.')
     if selected in rows:
@@ -128,7 +131,17 @@ def findings(report):
         if comparison:
             text.append(f"Paired diffusion comparison: fresh initialization seed {comparison['initialization_seed']}, "
                         f"trained checkpoint epoch {comparison['checkpoint_epoch']}, shared sampling seed {comparison['sampling_seed']}. "
-                        'Two synthetic windows; descriptive pixel/voxel discrepancies, without calibration postprocessing.')
+                        'Two synthetic windows; descriptive pixel/voxel discrepancies. ' +
+                        ('Both arms use identical output-alignment settings.' if comparison.get('shared_output_alignment') else
+                         'No output alignment or calibration postprocessing.'))
+        alignment = report.get('ot_alignment', {})
+        if alignment.get('enabled'):
+            text.append('Generation minimizes a conditional/unbalanced transport objective against training-only data. '
+                        'The original output is retained whenever refinement does not improve its hard-export objective. '
+                        'RGB camera pixels are not the optimization target.')
+            for row in alignment.get('samples', []):
+                text.append(f"Sample {row['sample']}: output-alignment objective {row['initial_objective']:.6f} -> "
+                            f"{row['final_objective']:.6f}; {row['accepted_updates']} accepted updates.")
     return text
 
 

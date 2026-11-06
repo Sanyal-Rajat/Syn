@@ -117,7 +117,5 @@ class LidarDMAdapter(nn.Module):
         if conditioning is not None:
             tolerance = self.config['geometry_tolerance_m']
             ranges = torch.where(known, ranges.maximum(geometry - tolerance).minimum(geometry + tolerance), ranges)
-            if conditioning.get('complete_scene', True):
-                valid &= known
-        return {'range': torch.where(valid, ranges, 0).float(), 'valid': valid,
-                'intensity': torch.where(valid, (value[:, :, 2] + 1) / 2, 0).float()}
+        from ..ot.refinement import refine
+        return refine(self, ranges, value[:, :, 1] * 4, (value[:, :, 2] + 1) / 2, conditioning, valid)

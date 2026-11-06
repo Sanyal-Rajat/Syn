@@ -6,8 +6,8 @@ from ..methods.registry import ControllerMethod
 
 
 class OTConfig(BaseModel):
-    conditional_weight: float = Field(0., ge=0, le=100)
-    mass_weight: float = Field(0., ge=0, le=100)
+    conditional_weight: float = Field(1., ge=0, le=100)
+    mass_weight: float = Field(1., ge=0, le=100)
     physics_weight: float = Field(0., ge=0, le=100)
     regularization_weight: float = Field(0., ge=0, le=100)
     epsilon: float = Field(.1, gt=0, le=10)
@@ -22,6 +22,10 @@ class OTConfig(BaseModel):
     max_points: int = Field(64, ge=4, le=512)
     min_samples: int = Field(4, ge=2, le=64)
     reference: str = ''
+    reference_windows: int = Field(32, ge=1, le=512)
+    generation_enabled: bool = True
+    generation_steps: int = Field(12, ge=1, le=200)
+    generation_lr: float = Field(.05, gt=0, le=1)
 
     @model_validator(mode='after')
     def physical_units(self):

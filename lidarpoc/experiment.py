@@ -15,7 +15,7 @@ from .io import write_json
 from .gpu import launch_training, resolve_gpus
 from .logs import progress
 from .models.lidardm_adapter import LidarDMAdapter
-from .ot.reference import build_reference, load_reference
+from .ot.reference import load_reference, prepare_reference
 from .provenance import license_gate, provenance, validate_checkpoint
 from .rl import RL_METHODS
 from .rl.comparison import compare as compare_rl
@@ -96,8 +96,9 @@ def run_experiment(config, directory):
     if config.checkpoint:
         validate_checkpoint(torch.load(config.checkpoint, map_location='cpu', weights_only=True), config.manifest)
     progress(directory, 'freezing training-only OT reference and canonical scene splits')
+    config = prepare_reference(config, directory, manifest, required=True)
     training = read_examples(manifest, 'train', config.window, config.samples_per_trace)
-    reference_path = build_reference(training, config.manifest, config.ot, directory / 'ot_reference.npz')
+    reference_path = config.ot.reference
     _, reference_metadata = load_reference(reference_path, config.manifest, config.ot)
     scenes = scene_splits(sensor, config.window, settings, directory / 'scenes')
     plan = {'specification': 'sim_to_real_OT_diffusion_RL_updated_report.pdf',
