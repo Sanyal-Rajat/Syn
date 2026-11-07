@@ -101,6 +101,12 @@ def train(config, output):
             loader_options.update(persistent_workers=True, prefetch_factor=2, multiprocessing_context='spawn')
         # Striding avoids the duplicate padding introduced by DistributedSampler during evaluation.
         validation_shard = Subset(validation_data, range(rank, len(validation_data), world_size))
+        range_indices = np.linspace(0, len(validation_data) - 1,
+            min(len(validation_data), config.ot.range_validation_windows), dtype=int).tolist()
+        resources['checkpoint_selection'] = {'metric': config.ot.checkpoint_metric, 'split': 'validation',
+            'window_indices': range_indices if config.ot.checkpoint_metric == 'range_w1_m' else [],
+            'sample_steps': config.sample_steps, 'seed_base': config.seed + 27183,
+            'output_refinement': config.ot.generation_enabled, 'aggregation': 'Equal weight per supported frame'}
         model_type = LidarDMAdapter
         if any((config.ot.conditional_weight, config.ot.mass_weight, config.ot.physics_weight, config.ot.regularization_weight)):
             from .models.ot_adapter import OTLidarDMAdapter
@@ -230,6 +236,7 @@ def train(config, output):
                              step + 1, len(loader))
             raw_model = model.module if distributed else model
             metric = torch.zeros(2, device=device, dtype=torch.float64)
+            range_metric = torch.zeros(3, device=device, dtype=torch.float64)
             raw_model.eval()
             with torch.no_grad(), torch.random.fork_rng(devices=[device.index] if device.type == 'cuda' else []):
                 torch.manual_seed(config.seed + 9182 + rank)
@@ -238,9 +245,24 @@ def train(config, output):
                         values = raw_model.train_step(to_device(batch, device))
                     metric[0] += values['loss'].double() * len(batch['range'])
                     metric[1] += len(batch['range'])
+                if config.ot.checkpoint_metric == 'range_w1_m':
+                    from .ot.range_distance import validate_generated
+                    phase = 'range_validation'
+                    range_metric = validate_generated(raw_model, validation_data, range_indices[rank::world_size],
+                                                      device, config.seed + 27183, autocast)
+                    phase = 'training'
             if distributed:
                 torch.distributed.all_reduce(metric)
+                torch.distributed.all_reduce(range_metric)
             validation_loss = float(metric[0] / metric[1].clamp_min(1))
+            validation_range = (float(range_metric[0] / range_metric[1])
+                                if range_metric[1] > 0 and range_metric[2] == 0 else None)
+            selection_score = validation_loss
+            if config.ot.checkpoint_metric == 'range_w1_m':
+                selection_score = validation_range if validation_range is not None else float('inf')
+            promote = selection_score < best
+            if promote:
+                best = selection_score
             resources['evaluated_validation_windows'] = int(metric[1])
             names = list(component_totals)
             totals = torch.stack([component_totals[key] for key in names] + [metric.new_tensor(sample_count)])
@@ -249,18 +271,28 @@ def train(config, output):
             if rank == 0:
                 averages = dict(zip(names, (totals[:-1] / totals[-1]).tolist()))
                 record = {'epoch': epoch + 1, 'train_loss': averages.pop('loss'), 'validation_loss': validation_loss}
+                if config.ot.checkpoint_metric == 'range_w1_m':
+                    record.update(validation_range_w1_m=validation_range,
+                                  validation_range_frames=int(range_metric[1]),
+                                  validation_range_missing_frames=int(range_metric[2]))
                 record.update({f'train_{key}': value for key, value in averages.items()})
                 history.append(record)
                 write_json(output / 'training.json', history)
                 get_logger().info('Epoch metrics: %s', json.dumps(record))
-                if validation_loss < best:
-                    best = validation_loss
+                if promote:
+                    selection = {**resources['checkpoint_selection'], 'value': best, 'epoch': epoch + 1,
+                                 'supported_frames': int(range_metric[1]), 'missing_frames': int(range_metric[2])}
                     checkpoint = {'state_dict': raw_model.state_dict(), 'optimizer': optimizer.state_dict(),
                                   'provenance': proof, 'sensor_meta': manifest['sensor_meta'],
-                                  'config': config.model_dump(), 'epoch': epoch + 1, 'validation_loss': best}
+                                  'config': config.model_dump(), 'epoch': epoch + 1, 'validation_loss': validation_loss,
+                                  'validation_range_w1_m': validation_range, 'checkpoint_selection': selection}
                     checkpoint['compute_config'] = resources
                     torch.save(checkpoint, output / 'checkpoint.tmp')
                     (output / 'checkpoint.tmp').replace(output / 'checkpoint.pt')
+                    get_logger().info('Checkpoint selected by %s: %.6f at epoch %d',
+                                      config.ot.checkpoint_metric, best, epoch + 1)
+        if best == float('inf'):
+            raise ValueError('No checkpoint has finite validation support for the selected metric; inspect training.json')
         if distributed:
             torch.distributed.barrier()
     except torch.cuda.OutOfMemoryError:

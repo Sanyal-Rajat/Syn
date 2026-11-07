@@ -129,7 +129,7 @@ def _run(config, directory):
         # Keep the checkpoint's physical feature definition; current generation defaults apply to old checkpoints too.
         overrides = {name: getattr(config.ot, name) for name in config.ot.model_fields_set}
         overrides.update({name: getattr(config.ot, name) for name in
-                          ('generation_enabled', 'generation_steps', 'generation_lr', 'reference_windows')})
+                          ('generation_enabled', 'generation_steps', 'generation_lr', 'generation_range_weight', 'reference_windows')})
         saved_ot = OTConfig(**checkpoint['config'].get('ot', {}))
         ot = saved_ot.model_copy(update=overrides)
         if 'reference' not in config.ot.model_fields_set and specification(ot) != specification(saved_ot):
@@ -280,6 +280,7 @@ def _run(config, directory):
     points = unproject(preview['range'][0], preview['valid'][0], manifest['sensor_meta']['elevations'])
     report = {'action': 'train', 'checkpoint': str(checkpoint_path), 'evaluations': evaluations,
               'ot_training': checkpoint['config'].get('ot', {}),
+              'checkpoint_selection': checkpoint.get('checkpoint_selection'),
               'profiles': profiles, 'selected_profile_on_validation': selected_profile,
               'training': json.loads((directory / 'training.json').read_text()),
               'resources': hardware(), 'preview': {'range': preview['range'][0].tolist(),

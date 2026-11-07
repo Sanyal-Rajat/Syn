@@ -6,6 +6,7 @@ from ..methods.registry import ControllerMethod
 
 
 class OTConfig(BaseModel):
+    range_weight: float = Field(1., ge=0, le=100)
     conditional_weight: float = Field(1., ge=0, le=100)
     mass_weight: float = Field(1., ge=0, le=100)
     physics_weight: float = Field(0., ge=0, le=100)
@@ -26,6 +27,9 @@ class OTConfig(BaseModel):
     generation_enabled: bool = True
     generation_steps: int = Field(12, ge=1, le=200)
     generation_lr: float = Field(.05, gt=0, le=1)
+    generation_range_weight: float = Field(1., ge=0, le=100)
+    checkpoint_metric: Literal['range_w1_m', 'validation_loss'] = 'range_w1_m'
+    range_validation_windows: int = Field(8, ge=1, le=512)
 
     @model_validator(mode='after')
     def physical_units(self):

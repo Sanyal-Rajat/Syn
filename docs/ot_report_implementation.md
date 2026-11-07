@@ -6,15 +6,26 @@ The existing application is extended through `action: "experiment"`; Prepare,
 Train, Generate, PPO calibration, logs, telemetry and SSH reuse keep their original
 entry points. No additional runtime package is required.
 
-Ordinary Train now enables conditional and unbalanced transport losses by default
-(weight 1 each). A bounded training-only reference is prepared automatically.
+Ordinary Train enables per-frame range W1, conditional and unbalanced transport
+losses by default (weight 1 each). A bounded training-only reference is prepared automatically.
 Generate applies bounded output refinement by default, on the existing sampling
-GPUs, and records initial/final hard-export objectives. Calibration/controller
+GPUs, and records initial/final hard-export range scores and secondary objectives. Calibration/controller
 outputs receive a final refinement pass before export. Existing checkpoints support
 generation refinement; new training is required to change their learned objective.
 The explicit E0/E1 experiment training controls remain available. Output refinement
 uses the same setting across all experiment/comparison arms. See the README's
 default distribution-matching section for settings, provenance and output limits.
+
+`ot/range_distance.py` integrates the one-dimensional empirical CDF difference
+over all finite positive ranges. Soft return masses provide training gradients;
+hard masks yield the same frame W1 used by the simple viewer. Every epoch samples
+the same bounded validation windows and seeds using the normal DDIM/refinement
+pipeline. The lowest mean supported-frame W1 selects the trained checkpoint;
+missing generated frames cannot win. Validation samples are inputs for scoring,
+never part of the training reference or weight updates. Scene-conditioned
+refinement cannot worsen any supported frame W1 or reduce initial frame return
+counts. Secondary OT breaks ties; its score can increase when range W1 improves.
+Unconditioned range targets use bounded quantiles from training data only.
 
 ## Report mapping
 
@@ -22,7 +33,7 @@ default distribution-matching section for settings, provenance and output limits
 | --- | --- |
 | E0, unadapted baseline | Random-root model, or the same approved own checkpoint used by every arm; no new model training; shared generation refinement still applies |
 | E1, real-domain diffusion | Same UNet capacity, seed, epochs and approved training traces |
-| E2, conditional transport | E1 plus debiased Sinkhorn on fixed physical features |
+| E2, conditional transport | E1 plus per-frame range W1 and debiased Sinkhorn on fixed physical features |
 | E3, return masses | E2 plus KL-regularized unbalanced transport |
 | E4, physical/temporal constraints | E3 plus geometry, pose-aware temporal loss when supported, and regularization |
 | E5, frozen controls | Frozen E4, metered SAC; fixed/random/BO/CMA-ES/bandit/PPO comparisons |

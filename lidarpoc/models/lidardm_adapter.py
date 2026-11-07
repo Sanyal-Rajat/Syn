@@ -72,10 +72,20 @@ class LidarDMAdapter(nn.Module):
         loss = diffusion + self.config['geometry_weight'] * geometry + self.config['raydrop_weight'] * drop
         loss += self.config['temporal_weight'] * temporal
         result = {'loss': loss, 'diffusion': diffusion, 'geometry': geometry, 'raydrop': drop, 'temporal': temporal}
-        if return_prediction:
-            result['prediction'] = {
+        range_weight = self.config.get('ot', {}).get('range_weight', 1.)
+        if return_prediction or range_weight:
+            prediction = {
                 'range': ((clean[:, :, 0] + 1) / 2 * math.log1p(self.sensor_meta['max_range_m'])).expm1(),
                 'valid': (clean[:, :, 1] * 4).sigmoid(), 'intensity': (clean[:, :, 2] + 1) / 2}
+            if range_weight:
+                from ..ot.range_distance import training_loss
+                with torch.autocast(device_type=x0.device.type, enabled=False):
+                    distance = training_loss({key: value.float() for key, value in prediction.items()}, batch,
+                                             self.sensor_meta['max_range_m'])
+                result['range_w1_m'] = distance
+                result['loss'] = result['loss'] + range_weight * distance
+            if return_prediction:
+                result['prediction'] = prediction
         return result
 
     def train_step(self, real_batch):

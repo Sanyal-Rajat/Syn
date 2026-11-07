@@ -9,6 +9,7 @@ import torch
 from .config import OTConfig
 from .features import conditional_ot, features, mass_ot, return_mass, select
 from .reference import load_reference
+from .range_distance import finite_number, frame_distances
 from ..data.split_manifest import digest
 from ..logs import get_logger
 
@@ -31,7 +32,7 @@ def _objective(sample, support, reference, sensor, config):
 
 
 def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=None):
-    """Return the best hard-export objective, including the original output candidate."""
+    """Retain non-worsening frame W1 on actual exported masks, starting with the original."""
     config = OTConfig(**model.config.get('ot', {}))
     if not config.generation_enabled:
         valid = initial_valid.clone() if initial_valid is not None else (logits > 0) & (ranges >= .1)
@@ -62,11 +63,26 @@ def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=No
                 upper = torch.where(known, (geometry + tolerance).clamp(.1, maximum), upper)
                 if conditioning.get('complete_scene', True):
                     allowed &= known
+            range_target = None
+            conditioned_target = conditioning is not None and bool(known.any())
+            if config.generation_range_weight:
+                if conditioned_target:
+                    range_target = {'range': geometry, 'valid': known}
+                else:
+                    if 'range_values' not in reference:
+                        raise ValueError('Rebuild the training reference to include range-distance support')
+                    range_target = {'range': reference['range_values'],
+                                    'valid': torch.ones_like(reference['range_values'], dtype=torch.bool)}
+                target_frames = (known.flatten(2).any(-1).reshape(-1) if conditioned_target else
+                                 torch.ones(original.shape[1], dtype=torch.bool, device=original.device))
             normalized = torch.nn.Parameter(original.maximum(lower).minimum(upper) / maximum)
             initial_logits = logits[index:index + 1].detach().clone().float()
             if initial_valid is not None:
                 valid = initial_valid[index:index + 1].to(original.device).clone().bool()
                 initial_logits = torch.where(valid, initial_logits, initial_logits.clamp_max(-.25))
+            if range_target is not None:
+                # Preserve the initial hard mask while allowing the bounded optimizer to change returns.
+                initial_logits.clamp_(-.25, .25)
             probabilities = torch.nn.Parameter(initial_logits)
             reflectance = torch.nn.Parameter(intensity[index:index + 1].detach().clone().float())
             parameters = [normalized, probabilities, reflectance]
@@ -79,9 +95,16 @@ def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=No
                         'valid': valid,
                         'intensity': torch.where(valid, reflectance, 0) if hard else reflectance}
 
+            def distances(sample, soft=False):
+                values = frame_distances(sample, range_target, soft=soft)
+                return torch.stack([value if value is not None else original.new_tensor(float('nan')).double()
+                                    for value in values])
+
             with torch.no_grad():
                 best = output(True)
                 initial = best_value = float(_objective(best, best['valid'], reference, model.sensor_meta, config))
+                initial_counts = best['valid'].flatten(2).sum(-1)
+                initial_distances = best_distances = distances(best) if range_target is not None else None
             if not np.isfinite(initial):
                 raise ValueError('Initial generation alignment objective is nonfinite')
             get_logger().info('Starting OT refinement on %s, window %d/%d: objective=%.6f',
@@ -90,7 +113,12 @@ def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=No
             for step in range(config.generation_steps):
                 attempted = step + 1
                 optimizer.zero_grad(set_to_none=True)
-                loss = _objective(output(False), allowed, reference, model.sensor_meta, config)
+                soft = output(False)
+                loss = _objective(soft, allowed, reference, model.sensor_meta, config)
+                if range_target is not None:
+                    gap = distances(soft, soft=True)
+                    if torch.isfinite(gap).any():
+                        loss = loss + config.generation_range_weight * gap[torch.isfinite(gap)].mean().float()
                 if not torch.isfinite(loss):
                     get_logger().warning('Nonfinite refinement loss; retaining the best finite output')
                     break
@@ -107,11 +135,24 @@ def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=No
                     reflectance.clamp_(0, 1)
                     candidate = output(True)
                     value = float(_objective(candidate, candidate['valid'], reference, model.sensor_meta, config))
-                    if np.isfinite(value) and value < best_value - 1e-7:
+                    candidate_distances = distances(candidate) if range_target is not None else None
+                    better = value < best_value - 1e-7
+                    if range_target is not None:
+                        proposed, retained = candidate_distances[target_frames], best_distances[target_frames]
+                        finite = bool(torch.isfinite(proposed).all())
+                        comparable = bool(torch.isfinite(retained).all())
+                        closer = finite and (not comparable or (
+                            bool((proposed <= retained + 1e-9).all()) and
+                            (float(proposed.mean()) < float(retained.mean()) - 1e-9 or better)))
+                        coverage = (not conditioned_target or
+                                    bool((candidate['valid'].flatten(2).sum(-1) >= initial_counts).all()))
+                        better = closer and coverage
+                    if np.isfinite(value) and better:
                         best, best_value = candidate, value
+                        best_distances = candidate_distances
                         accepted += 1
                 if attempted % max(1, config.generation_steps // 4) == 0:
-                    get_logger().info('OT refinement on %s: step %d/%d, best objective=%.6f',
+                    get_logger().info('OT refinement on %s: step %d/%d, retained secondary objective=%.6f',
                                       original.device, attempted, config.generation_steps, best_value)
             best.update(ot_initial_objective=original.new_tensor([initial]),
                         ot_final_objective=original.new_tensor([best_value]),
@@ -119,6 +160,11 @@ def refine(model, ranges, logits, intensity, conditioning=None, initial_valid=No
                         ot_accepted_updates=original.new_tensor([accepted], dtype=torch.int32),
                         has_intensity=torch.full(original.shape[:2], cache[2].get('intensity_observed',
                             bool(config.feature_weights[1])), dtype=torch.bool, device=original.device))
+            if range_target is not None:
+                best.update(ot_range_initial_m=initial_distances[None], ot_range_final_m=best_distances[None],
+                            ot_range_conditioned=torch.tensor([conditioned_target], device=original.device))
+                get_logger().info('Range-distance refinement on %s: %s -> %s m per frame; conditioned target=%s',
+                                  original.device, initial_distances.tolist(), best_distances.tolist(), conditioned_target)
             results.append(best)
             get_logger().info('OT refinement on %s, window %d/%d: %.6f -> %.6f; %d steps, %d accepted',
                               original.device, index + 1, len(ranges), initial, best_value, attempted, accepted)
@@ -166,9 +212,19 @@ def describe_refinement(samples, config, final_stage=False):
             rows.append({'sample': index, 'initial_objective': float(sample['ot_initial_objective']),
                          'final_objective': float(sample['ot_final_objective']),
                          'steps': int(sample['ot_refinement_steps']), 'accepted_updates': int(sample['ot_accepted_updates'])})
+            if 'ot_range_initial_m' in sample:
+                rows[-1].update(range_initial_m=[finite_number(value) for value in np.asarray(sample['ot_range_initial_m']).reshape(-1)],
+                                range_final_m=[finite_number(value) for value in np.asarray(sample['ot_range_final_m']).reshape(-1)],
+                                range_target='conditioning_scene' if bool(sample['ot_range_conditioned']) else 'training_reference_quantiles')
     return {'enabled': bool(rows), 'reference': config.reference or None,
             'reference_sha256': digest(config.reference) if rows else None, 'reference_split': 'train',
-            'samples': rows, 'objective': 'conditional Sinkhorn + unbalanced KL-OT + unsupported-bin penalty',
+            'samples': rows, 'range_weight': config.generation_range_weight,
+            'objective': ('Frame-wise range W1 in metres plus ' if config.generation_range_weight else '') +
+                         'conditional Sinkhorn, unbalanced KL-OT and unsupported-bin penalty',
+            'objective_fields': 'initial_objective/final_objective store secondary OT; range_initial_m/range_final_m store per-frame W1.',
             'scope': ('Final output after calibration/controller changes.' if final_stage else 'Generated sensor output.') +
                      ' Geometry-constrained LiDAR refinement; not an RGB image loss.',
-            'selection': 'Best exported hard-mask objective including the original sample; other metrics may differ.'}
+            'selection': ('No frame range W1 may worsen; smaller mean W1 is primary, secondary OT breaks ties. '
+                          'Conditioned frame return counts cannot fall below the original. Original sample is a candidate.'
+                          if config.generation_range_weight else 'Best exported secondary OT objective including the original sample.'),
+            'limits': 'Per-sample refinement does not guarantee that a trained model outperforms an untrained model.'}

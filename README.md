@@ -272,46 +272,88 @@ observed intensity disables that feature automatically; distance and return
 alignment remain enabled. A provided reference is validated against the manifest,
 feature definition and temporal window before use.
 
-- **Training:** conditional and unbalanced OT losses both have default weight
-  `1.0`, in addition to the existing diffusion, geometry, return-mask and temporal
-  losses. DDP workers share the reference prepared by rank zero. Actual settings
-  are saved in the request/checkpoint; training logs include the OT loss components.
+- **Training:** per-frame radial-range Wasserstein-1 (W1), conditional transport
+  and unbalanced transport each have default weight `1.0`, in addition to the
+  existing diffusion, geometry, return-mask and temporal losses. The range loss
+  compares predictions with the matching real training frame, using differentiable
+  return probabilities on the observed scene rays. It retains all finite positive
+  ranges and integrates the empirical CDF difference; there is no histogram or
+  point subsampling in this loss. Its units are metres. The other transport losses
+  keep the frozen training-only reference shared by DDP workers.
+- **Checkpoint selection:** after every epoch, generate actual conditioned samples
+  from eight fixed, evenly spaced validation windows (or all if fewer), using the
+  configured sampling steps, fixed per-window seeds and normal output refinement.
+  Windows are divided across training GPUs. Save the trained checkpoint with the
+  lowest mean exact hard-output frame W1, matching the simple viewer's distance
+  definition. Denoising validation loss remains recorded. Empty generated support
+  is counted as missing and cannot win selection; test data never selects weights.
 - **Generation:** each sampling GPU runs 12 bounded output-refinement steps by
   default, optimizing distances, return probabilities and available intensity.
-  The objective combines conditional transport, unbalanced return-mass transport
-  and an unsupported-bin penalty. Candidate updates obey sensor bounds and, for
-  conditioned scenes, the existing surface tolerance and known-ray mask. Selection
-  evaluates the actual exported hard masks and includes the original output, so
-  the retained objective cannot worsen. When an optional calibration profile or
-  learned controller modifies the output, final arrays are refined again across
-  the selected GPUs before export.
+  The gradient objective includes range W1 alongside conditional transport,
+  unbalanced return-mass transport and the unsupported-bin penalty. When a real
+  conditioning scene is supplied, its complete finite positive observed ranges
+  are the range target, matching the displayed graph. Unconditional generation
+  uses at most 4096 equally weighted training-range quantiles as an approximate
+  prior; it has no paired real-scene graph. Legacy references are rebuilt locally
+  in the new job when range support is missing.
 
-`result.json` records `ot_training` for Train and per-sample initial/final objectives,
-attempted steps, accepted updates and reference provenance under `ot_alignment`
-for Generate. The PDF includes the measured changes. NPZ files also retain the
-generation alignment diagnostics. Other displayed scores, such as the scalar
-distance-distribution chart, measure different properties and may still worsen.
+Candidate selection measures W1 on the actual exported hard masks, independently
+for each supported frame. It keeps the original output as a candidate and rejects
+updates that worsen any frame's W1 (apart from floating-point tolerance). A smaller
+mean W1 takes priority; secondary OT breaks ties and may increase. Conditioned
+frame return counts cannot fall below their initial counts, so losing coverage
+cannot purchase a lower distance score. Geometry bounds, surface tolerance and
+known-ray masks remain enforced. Calibration/controller outputs receive the same
+final refinement on the selected GPUs. Both paired arms use identical settings;
+this postprocessing changes outputs, not the frozen network weights.
+
+`training.json` includes `train_range_w1_m`, `validation_range_w1_m`, supported
+validation frames and missing frames. Training progress displays distances
+separately from loss curves and frame counts. Checkpoints and Train `result.json`
+record `checkpoint_selection` with the selected score, epoch, validation indices,
+seeds and sampling settings. Generate records per-frame `range_initial_m` and
+`range_final_m` plus the actual range target under `ot_alignment.samples`; NPZs
+store `ot_range_initial_m`, `ot_range_final_m` and `ot_range_conditioned`. Secondary
+OT values remain separately recorded. PDFs include these diagnostics.
+
+The metric is the viewer's equally weighted mean of per-frame, one-dimensional
+empirical W1, using all valid finite positive ranges. The CDF definition matches
+[SciPy's Wasserstein distance](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_distance.html).
+Training uses soft return masses for gradients; checkpoint selection and generation
+acceptance use hard exported masks. This aligns optimization and selection with
+the graph; it does not guarantee a trained model beats a fresh initialization on
+every scene or seed. Spatial geometry, camera overlays and other OT measures can
+behave differently. Existing result files retain their original measurements.
 
 Settings are modular under `lidarpoc/ot/`; the existing RL library remains separate.
 The default settings below apply to both UI submissions and JSON requests:
 
 ```json
-"ot": {
-  "conditional_weight": 1.0,
-  "mass_weight": 1.0,
-  "reference_windows": 32,
-  "generation_enabled": true,
-  "generation_steps": 12,
-  "generation_lr": 0.05
+{
+  "ot": {
+    "range_weight": 1.0,
+    "conditional_weight": 1.0,
+    "mass_weight": 1.0,
+    "checkpoint_metric": "range_w1_m",
+    "range_validation_windows": 8,
+    "reference_windows": 32,
+    "generation_enabled": true,
+    "generation_range_weight": 1.0,
+    "generation_steps": 12,
+    "generation_lr": 0.05
+  }
 }
 ```
 
 Explicit experiment ablations retain their documented training controls: E0 does
-no additional training and E1 omits OT training losses. Generation alignment uses
-the same setting across arms. An explicit raw-generation override is still
-available with `ot.generation_enabled=false`; zero training weights remain
-available for controlled comparisons. Older checkpoints can use the new generation
-refinement, but must be retrained to incorporate OT into their learned weights.
+no additional training and E1 omits OT training losses, including the direct range
+loss. E2 and later add range W1 alongside their documented OT components.
+Generation alignment uses the same setting across arms. Explicit overrides remain:
+`ot.generation_enabled=false` gives raw generation; `ot.generation_range_weight=0`
+restores selection by the secondary generation objective; zero training weights
+and `ot.checkpoint_metric="validation_loss"` allow the earlier training control.
+Older checkpoints can use the new generation refinement, but must be retrained
+to incorporate direct range W1 into their learned weights and checkpoint selection.
 Generation defaults use the checkpoint's physical feature definition, with current
 request overrides applied explicitly. A missing legacy reference is rebuilt from
 the matching manifest's training split.

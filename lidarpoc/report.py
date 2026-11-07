@@ -61,6 +61,13 @@ def findings(report):
     ot_training = report.get('ot_training', {})
     if ot_training.get('conditional_weight') or ot_training.get('mass_weight'):
         text.append('Training minimizes conditional and/or unbalanced LiDAR transport losses against a frozen training-only reference.')
+    if ot_training.get('range_weight'):
+        text.append('Training also minimizes frame-averaged range Wasserstein-1 in metres, using differentiable return masses on real observed rays.')
+    selection = report.get('checkpoint_selection') or {}
+    if selection.get('metric') == 'range_w1_m':
+        text.append(f"Checkpoint epoch {selection['epoch']} was selected using actual generated validation scenes: "
+                    f"mean range W1 {format_value(selection.get('value'))} m across {selection.get('supported_frames')} frames. "
+                    'The fixed validation scenes, seeds and sampling steps are recorded; test scenes did not select this checkpoint.')
     if selected:
         text.append(f'Selected on development/validation data: {selected}. Test scores did not choose the selection.')
     if selected in rows:
@@ -136,12 +143,19 @@ def findings(report):
                          'No output alignment or calibration postprocessing.'))
         alignment = report.get('ot_alignment', {})
         if alignment.get('enabled'):
-            text.append('Generation minimizes a conditional/unbalanced transport objective against training-only data. '
-                        'The original output is retained whenever refinement does not improve its hard-export objective. '
+            text.append('Generation retains the original sample as an output candidate. ' +
+                        ('Exact per-frame range W1 is the primary selection score; secondary transport terms may increase. '
+                         'The conditioning scene supplies the exact range target when available; unconditional targets use training quantiles. '
+                         'No supported frame W1 may increase, and conditioned frame return counts cannot fall below the original. '
+                         if alignment.get('range_weight') else
+                         'Refinement selects the best conditional/unbalanced training-reference objective. ') +
                         'RGB camera pixels are not the optimization target.')
             for row in alignment.get('samples', []):
-                text.append(f"Sample {row['sample']}: output-alignment objective {row['initial_objective']:.6f} -> "
+                text.append(f"Sample {row['sample']}: secondary transport objective {row['initial_objective']:.6f} -> "
                             f"{row['final_objective']:.6f}; {row['accepted_updates']} accepted updates.")
+                if 'range_initial_m' in row:
+                    text.append(f"Frame range W1 (m): {format_value(row['range_initial_m'])} -> "
+                                f"{format_value(row['range_final_m'])}; target: {row['range_target']}.")
     return text
 
 
@@ -310,8 +324,9 @@ def write_pdf(result_path, output=None):
                                'Host-wide utilization history is not included in result.json.'))
     elif report.get('action') == 'train':
         section('Training history')
-        table(['Epoch', 'Training loss', 'Validation loss'],
-              [[row.get(key) for key in ('epoch', 'train_loss', 'validation_loss')] for row in report.get('training', [])])
+        table(['Epoch', 'Training loss', 'Validation loss', 'Generated validation distance (m)'],
+              [[row.get(key) for key in ('epoch', 'train_loss', 'validation_loss', 'validation_range_w1_m')]
+               for row in report.get('training', [])])
     elif report.get('action') == 'prepare':
         section('Prepared inventory')
         table(['Split', 'Trace', 'Frames', 'Source frames'],

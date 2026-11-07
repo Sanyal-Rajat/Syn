@@ -77,6 +77,22 @@ def json_setting(label, default):
         st.stop()
 
 
+def training_charts(rows):
+    history = pd.DataFrame(rows).set_index('epoch')
+    losses = [name for name in history if not name.endswith(('_m', '_frames'))]
+    if losses:
+        st.line_chart(history[losses])
+    distances = {name: label for name, label in (
+        ('train_range_w1_m', 'During training'), ('validation_range_w1_m', 'Generated validation scenes'))
+        if name in history}
+    if distances:
+        st.caption('Distance difference: lower means a closer match. ' +
+                   ('The best validation result selects the checkpoint.' if 'validation_range_w1_m' in distances else
+                    'Training uses differentiable return probabilities.'))
+        st.line_chart(history[list(distances)].rename(columns=distances),
+                      x_label='Epoch', y_label='Distance difference (metres)')
+
+
 def manifest_input(default='', generation=False):
     try:
         prepared = api('GET', '/dataset/prepared').json()
@@ -469,7 +485,7 @@ def monitor():
                 api('POST', f'/jobs/{job_id}/cancel')
                 st.rerun(scope='fragment')
             if state.get('training'):
-                st.line_chart(pd.DataFrame(state['training']).set_index('epoch'))
+                training_charts(state['training'])
         cursor = st.session_state.setdefault(f'log:{endpoint}:{job_id}', {})
         log = sync_remote_log(api, job_id, cursor)
         st.subheader('Live processing log')
@@ -597,7 +613,7 @@ def monitor():
                 st.json(report['compute'])
                 st.write(report['limitations'])
         else:
-            st.line_chart(pd.DataFrame(report['training']).set_index('epoch'))
+            training_charts(report['training'])
             st.dataframe([{'method': name, 'held_out_loss': value['loss']['mean'], 'CI95': str(value['loss']['ci95'])}
                           for name, value in report['evaluations'].items()], hide_index=True)
             st.caption(f"Export profile selected on validation: {report['selected_profile_on_validation']}")

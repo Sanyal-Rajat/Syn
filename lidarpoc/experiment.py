@@ -46,6 +46,7 @@ def arm_config(config, arm, reference, sensor, seed):
     order = int(arm[1])
     weights = config.experiment
     ot = config.ot.model_copy(update={'reference': reference,
+        'range_weight': config.ot.range_weight if order >= 2 else 0.,
         'conditional_weight': weights.conditional_weight if order >= 2 else 0.,
         'mass_weight': weights.mass_weight if order >= 3 else 0.,
         'physics_weight': weights.physics_weight if order >= 4 else 0.,
