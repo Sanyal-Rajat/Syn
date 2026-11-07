@@ -250,9 +250,19 @@ before the helper can share it. OpenSSH describes this behavior under
 5. Run **Prepare Pandar128**, then select Train, Generate or the OT experiment.
    **Completed preparation** initially selects the latest available server manifest.
    Choose an older preparation or enter a custom server path when needed; manual
-   selections persist across operations. Starting requires a nonempty manifest path.
-   Discovery excludes unfinished jobs and missing/corrupt manifests and also works
-   after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
+   selections persist across operations. Train and the experiment also provide
+   **Use latest prepared dataset** to restore automatic selection; clearing the
+   path resumes automatic lookup. Starting requires a nonempty manifest path.
+   Discovery prefers successful preparations, then recovers valid
+   `runs/<job>/prepared/manifest.json` files left after reporting/export failures
+   and manifests referenced by completed training/generation/experiment jobs.
+   Active preparations and missing/corrupt manifests are skipped. A recovered
+   manifest still passes normal split and training-file validation before use.
+   If the preparation-list endpoint is unavailable or empty, the client also
+   checks the latest successful training dataset without extracting a scene.
+   When nothing is found, run **Prepare Pandar128** or enter an existing server
+   manifest path; the experiment cannot start from an unprepared download folder.
+   Discovery works after restarting the API or client. Whole trace IDs, source SHA-256, prepared-frame SHA-256 and
    quantized range fingerprints reject overlapping splits. The near-duplicate
    fingerprint is a heuristic, not a comprehensive scene-identity proof.
 6. Choose **Train diffusion + calibration** for training with automatic distribution matching and RL calibration,

@@ -99,11 +99,21 @@ def manifest_input(default='', generation=False):
     except httpx.HTTPError:
         prepared = []
         st.caption('Prepared dataset list unavailable. Enter a manifest path below, or update the remote API.')
+    if not prepared and not default:
+        try:
+            detected = api('POST', '/generation/inputs', json={'auto_conditioning': False}).json()
+            default = detected.get('manifest', '')
+        except httpx.HTTPError:
+            pass  # Older servers can still accept an explicitly entered manifest.
     paths = [row['manifest'] for row in prepared]
     manual = 'Enter a server path manually'
     prefix = 'generate_' if generation else ''
     saved_key, field_key, choice_key = (f'{prefix}{name}:{endpoint}' for name in ('manifest_saved', 'manifest_field', 'manifest_choice'))
     saved = st.session_state.setdefault(saved_key, {'path': '', 'manual': False})
+    if not generation and st.button('Use latest prepared dataset', key=f'{prefix}manifest_detect:{endpoint}'):
+        saved.update(path='', manual=False)
+        st.session_state[field_key] = ''
+        st.session_state[choice_key] = manual
     if default and not saved['manual']:
         saved['path'] = default
         st.session_state[field_key] = default
@@ -124,7 +134,7 @@ def manifest_input(default='', generation=False):
 
     def edit():
         path = st.session_state[field_key].strip()
-        st.session_state[saved_key].update(path=path, manual=True)
+        st.session_state[saved_key].update(path=path, manual=bool(path))
         st.session_state[choice_key] = path if path in paths else manual
 
     if prepared:
@@ -133,6 +143,9 @@ def manifest_input(default='', generation=False):
             format_func=lambda path: manual if path == manual else
                 f"{rows[path]['job_id'][:12]} · {rows[path]['height']}×{rows[path]['width']} · {rows[path]['traces']} traces",
             help='The latest completed preparation is selected initially. You can choose another or enter a custom path.')
+        selected = rows.get(saved['path'], {})
+        if selected.get('source') in ('recovered_preparation', 'completed_job_reference'):
+            st.caption('Using validated prepared data recovered from saved server files.')
     elif not saved['path']:
         st.info('Complete Prepare Pandar128 on this server, or enter an existing prepared manifest path below.')
     return st.text_input('Prepared manifest path on the server', key=field_key,
@@ -413,6 +426,9 @@ with configure:
         missing_inputs.append('a conditioning NPZ or automatic real-scene extraction')
     if missing_inputs:
         message = 'Start remote job is disabled: enter ' + ' and '.join(missing_inputs) + '.'
+        if action in ('train', 'experiment') and not config['manifest']:
+            message += (' Click Use latest prepared dataset to detect existing server data. '
+                        'If none is available, complete Prepare Pandar128 first.')
         if action == 'generate' and not config['checkpoint']:
             message += (' Generation requires a trained checkpoint matching the selected manifest. '
                         'Automatic real-scene extraction supplies geometry; it does not train the model.')
